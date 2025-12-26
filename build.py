@@ -83,7 +83,7 @@ def build_app(target_platform="auto"):
     print(f"Target platform: {system}")
 
     # Create spec file for better module control
-    spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
+    spec_content = '''# -*- mode: python ; coding: utf-8 -*-
 
 import sys
 import os
@@ -119,23 +119,14 @@ hidden_imports = [
 # Data files
 data_files = []
 if os.path.exists('config'):
-    if '{system}' == 'windows':
-        data_files.append(('config', 'config'))
-    else:
-        data_files.append(('config', 'config'))
+    data_files.append(('config', 'config'))
 
 if os.path.exists('assets'):
-    if '{system}' == 'windows':
-        data_files.append(('assets', 'assets'))
-    else:
-        data_files.append(('assets', 'assets'))
+    data_files.append(('assets', 'assets'))
 
 # Add src directory
 if os.path.exists('src'):
-    if '{system}' == 'windows':
-        data_files.append(('src', 'src'))
-    else:
-        data_files.append(('src', 'src'))
+    data_files.append(('src', 'src'))
 
 a = Analysis(
     [main_script],
@@ -144,7 +135,7 @@ a = Analysis(
     datas=data_files,
     hiddenimports=hidden_imports,
     hookspath=[],
-    hooksconfig={{}},
+    hooksconfig={},
     runtime_hooks=[],
     excludes=[],
     win_no_prefer_redirects=False,
@@ -158,30 +149,23 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     [],
-    exclude_binaries=True,
     name='DiscordAutoReply',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='DiscordAutoReply',
 )
 '''
 
@@ -194,6 +178,7 @@ coll = COLLECT(
     cmd = [
         "pyinstaller",
         "--clean",  # Clean temporary files
+        "--onefile",  # Create single executable ⭐ 关键修复
         spec_file,  # Use spec file
     ]
 

@@ -52,6 +52,19 @@ jobs:
           Write-Host "$($_.Name): $($_.Length) bytes"
         }
 
+    - name: Verify build output
+      run: |
+        if (Test-Path "dist/DiscordAutoReply.exe") {
+          $size = (Get-Item "dist/DiscordAutoReply.exe").Length
+          Write-Host "✅ Executable found: DiscordAutoReply.exe ($size bytes)"
+          if ($size -lt 10000000) {  # Less than 10MB
+            Write-Host "⚠️  Warning: Executable size seems too small ($size bytes)"
+          }
+        } else {
+          Write-Host "❌ Executable not found: dist/DiscordAutoReply.exe"
+          exit 1
+        }
+
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -60,7 +73,7 @@ jobs:
           dist/DiscordAutoReply.exe
           Windows使用说明.md
         retention-days: 30
-        if-no-files-found: error
+        if-no-files-found: warn
 
     - name: Create Release (on tag)
       if: startsWith(github.ref, 'refs/tags/')
