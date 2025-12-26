@@ -178,8 +178,7 @@ exe = EXE(
     cmd = [
         "pyinstaller",
         "--clean",  # Clean temporary files
-        "--onefile",  # Create single executable ⭐ 关键修复
-        spec_file,  # Use spec file
+        spec_file,  # Use spec file (spec file defines output mode)
     ]
 
     # Run PyInstaller
