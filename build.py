@@ -43,10 +43,10 @@ def check_dependencies():
         return False
 
     try:
-        import PyQt6
-        print("[OK] PyQt6 is installed")
+        import PySide6
+        print("[OK] PySide6 is installed")
     except ImportError:
-        print("[ERROR] PyQt6 not installed, run: pip install PyQt6")
+        print("[ERROR] PySide6 not installed, run: pip install PySide6")
         return False
 
     # qasync不再需要，直接使用asyncio集成
