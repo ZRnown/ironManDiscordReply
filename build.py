@@ -82,44 +82,120 @@ def build_app(target_platform="auto"):
 
     print(f"Target platform: {system}")
 
-    # Base PyInstaller command
+    # Create spec file for better module control
+    spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
+
+import sys
+import os
+
+# Add src directory to path
+sys.path.insert(0, os.path.join(SPECPATH, 'src'))
+
+block_cipher = None
+
+# Define the main script
+main_script = os.path.join(SPECPATH, 'src', 'main.py')
+
+# Collect all PySide6 modules
+pyside6_imports = [
+    'PySide6.QtCore',
+    'PySide6.QtGui',
+    'PySide6.QtWidgets',
+    'shiboken6',
+]
+
+# Hidden imports
+hidden_imports = [
+    'discord_client',
+    'config_manager',
+    'gui',
+    'discord',
+    'aiohttp',
+    'yarl',
+    'asyncio',
+    'typing_extensions',
+] + pyside6_imports
+
+# Data files
+data_files = []
+if os.path.exists('config'):
+    if '{system}' == 'windows':
+        data_files.append(('config', 'config'))
+    else:
+        data_files.append(('config', 'config'))
+
+if os.path.exists('assets'):
+    if '{system}' == 'windows':
+        data_files.append(('assets', 'assets'))
+    else:
+        data_files.append(('assets', 'assets'))
+
+# Add src directory
+if os.path.exists('src'):
+    if '{system}' == 'windows':
+        data_files.append(('src', 'src'))
+    else:
+        data_files.append(('src', 'src'))
+
+a = Analysis(
+    [main_script],
+    pathex=[SPECPATH],
+    binaries=[],
+    datas=data_files,
+    hiddenimports=hidden_imports,
+    hookspath=[],
+    hooksconfig={{}},
+    runtime_hooks=[],
+    excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='DiscordAutoReply',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='DiscordAutoReply',
+)
+'''
+
+    # Write spec file
+    spec_file = "DiscordAutoReply.spec"
+    with open(spec_file, 'w', encoding='utf-8') as f:
+        f.write(spec_content)
+
+    # Base PyInstaller command using spec file
     cmd = [
         "pyinstaller",
-        "--onefile",  # Package as single file
-        "--windowed",  # No console window
         "--clean",  # Clean temporary files
-        "--name", "DiscordAutoReply",
+        spec_file,  # Use spec file
     ]
-
-    # Add platform-specific options
-    if system == "darwin" or system == "mac":  # macOS
-        cmd.extend([
-            "--target-arch", "universal2",  # Universal binary
-            "--osx-bundle-identifier", "com.discordautoreply.app",
-        ])
-        print("Using macOS build configuration")
-    elif system == "windows" or system == "win":  # Windows
-        # PyInstaller 6.0+ no longer needs --win-private-assemblies
-        print("Using Windows build configuration")
-    else:
-        print(f"Unsupported platform: {system}")
-        return False
-
-    # Add data files
-    if os.path.exists("config"):
-        if system == "windows":
-            cmd.extend(["--add-data", "config;config"])
-        else:  # macOS and others
-            cmd.extend(["--add-data", "config:config"])
-
-    if os.path.exists("assets"):
-        if system == "windows":
-            cmd.extend(["--add-data", "assets;assets"])
-        else:  # macOS and others
-            cmd.extend(["--add-data", "assets:assets"])
-
-    # Add main file
-    cmd.append("src/main.py")
 
     # Run PyInstaller
     command_str = " ".join(cmd)

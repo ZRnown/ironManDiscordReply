@@ -10,7 +10,12 @@ import os
 # 添加src目录到Python路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from gui import main
+try:
+    from gui import main
+except ImportError:
+    # 如果相对导入失败，尝试绝对导入
+    import gui
+    main = gui.main
 
 if __name__ == "__main__":
     import asyncio
