@@ -8,25 +8,33 @@ import os
 from pathlib import Path
 
 def main():
-    """主函数"""
-    # 添加src目录到Python路径
+    # 1. 路径设置
     project_root = Path(__file__).parent
     src_dir = project_root / "src"
     sys.path.insert(0, str(src_dir))
 
-    # 检查依赖
+    # 2. 依赖检查
     try:
-        import PySide6
         import discord
-        import qasync
+        import PySide6
+
+        # 移除了对 Intents 的检查，因为 discord.py-self 2.0+ 已经废弃了它
+        print(f"Discord 库版本: {getattr(discord, '__version__', '未知')}")
+        print("环境依赖检查通过。")
+
     except ImportError as e:
-        print(f"缺少依赖: {e}")
-        print("请运行: pip install -r requirements.txt")
+        print(f"❌ 缺少依赖: {e}")
+        print("请运行: pip install discord.py-self PySide6 typing-extensions")
         return
 
-    # 运行程序
-    from src.gui import main
-    main()
+    # 3. 启动 GUI
+    try:
+        from src.gui import main as gui_main
+        gui_main()
+    except Exception as e:
+        print(f"程序崩溃: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()

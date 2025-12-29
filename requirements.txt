@@ -1,4 +1,4 @@
-discord.py-self>=2.0.1
+discord.py-self==1.9.2
 typing-extensions>=4.0.0
 PySide6==6.8.0.2
 pyinstaller==6.3.0

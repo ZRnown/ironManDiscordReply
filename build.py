@@ -2,6 +2,12 @@
 """
 Discord Auto Reply Tool Build Script
 Supports Mac and Windows platform packaging
+Requirements:
+- discord.py-self >= 2.0.0
+- typing-extensions >= 4.0.0
+- PySide6 == 6.8.0.2
+- pyinstaller == 6.3.0
+- shiboken6 == 6.8.0.2
 """
 
 import os
@@ -30,26 +36,31 @@ def check_dependencies():
 
     try:
         import PyInstaller
-        print("[OK] PyInstaller is installed")
+        print(f"[OK] PyInstaller is installed ({PyInstaller.__version__})")
     except ImportError:
-        print("[ERROR] PyInstaller not installed, run: pip install pyinstaller")
+        print("[ERROR] PyInstaller not installed, run: pip install pyinstaller==6.3.0")
         return False
 
     try:
         import discord
-        print("[OK] discord.py-self is installed")
+        print(f"[OK] discord.py-self is installed ({discord.__version__})")
     except ImportError:
         print("[ERROR] discord.py-self not installed, run: pip install discord.py-self")
         return False
 
     try:
         import PySide6
-        print("[OK] PySide6 is installed")
+        print(f"[OK] PySide6 is installed ({PySide6.__version__})")
     except ImportError:
-        print("[ERROR] PySide6 not installed, run: pip install PySide6")
+        print("[ERROR] PySide6 not installed, run: pip install PySide6==6.8.0.2")
         return False
 
-    # qasync不再需要，直接使用asyncio集成
+    try:
+        import typing_extensions
+        print("[OK] typing-extensions is installed")
+    except ImportError:
+        print("[ERROR] typing-extensions not installed, run: pip install typing-extensions>=4.0.0")
+        return False
 
     return True
 
@@ -87,6 +98,7 @@ def build_app(target_platform="auto"):
 
 import sys
 import os
+from PyInstaller.utils.hooks import collect_all
 
 # Add src directory to path
 sys.path.insert(0, os.path.join(SPECPATH, 'src'))
@@ -96,13 +108,9 @@ block_cipher = None
 # Define the main script
 main_script = os.path.join(SPECPATH, 'src', 'main.py')
 
-# Collect all PySide6 modules
-pyside6_imports = [
-    'PySide6.QtCore',
-    'PySide6.QtGui',
-    'PySide6.QtWidgets',
-    'shiboken6',
-]
+# Collect PySide6 and shiboken6
+pyside6_datas, pyside6_binaries, pyside6_hiddenimports = collect_all('PySide6')
+shiboken6_datas, shiboken6_binaries, shiboken6_hiddenimports = collect_all('shiboken6')
 
 # Hidden imports
 hidden_imports = [
@@ -114,7 +122,7 @@ hidden_imports = [
     'yarl',
     'asyncio',
     'typing_extensions',
-] + pyside6_imports
+] + pyside6_hiddenimports + shiboken6_hiddenimports
 
 # Data files
 data_files = []
@@ -128,10 +136,12 @@ if os.path.exists('assets'):
 if os.path.exists('src'):
     data_files.append(('src', 'src'))
 
+data_files += pyside6_datas + shiboken6_datas
+
 a = Analysis(
     [main_script],
     pathex=[SPECPATH],
-    binaries=[],
+    binaries=pyside6_binaries + shiboken6_binaries,
     datas=data_files,
     hiddenimports=hidden_imports,
     hookspath=[],
@@ -178,6 +188,7 @@ exe = EXE(
     cmd = [
         "pyinstaller",
         "--clean",  # Clean temporary files
+        "--noconfirm",
         spec_file,  # Use spec file (spec file defines output mode)
     ]
 

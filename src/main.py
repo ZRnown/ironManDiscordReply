@@ -18,5 +18,6 @@ except ImportError:
     main = gui.main
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    # 直接调用 main()，因为 gui.main() 是同步的 (app.exec())
+    # 不要使用 asyncio.run()，因为 PySide6 的事件循环接管了主线程
+    main()
