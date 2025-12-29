@@ -93,7 +93,18 @@ def build_app(target_platform="auto"):
 
     print(f"Target platform: {system}")
 
-    # Create spec file for better module control
+    # Choose spec file based on platform
+    if system == "windows":
+        spec_template = "DiscordAutoReply-windows.spec"
+        if os.path.exists(spec_template):
+            # Use Windows-specific spec file
+            spec_file = spec_template
+            print(f"Using Windows-specific spec file: {spec_template}")
+            command_str = f"pyinstaller --clean --noconfirm {spec_file}"
+            print(f"Executing command: {command_str}")
+            return run_command(command_str, "building Windows application")
+
+    # Create spec file for better module control (for macOS and other platforms)
     spec_content = '''# -*- mode: python ; coding: utf-8 -*-
 
 import sys
@@ -226,7 +237,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=True,  # 启用strip以减小文件大小
-    upx=True,
+    upx=False,  # 在Windows上禁用UPX，避免DLL加载问题
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
