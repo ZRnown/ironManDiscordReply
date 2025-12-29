@@ -138,33 +138,80 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # 排除不必要的标准库模块
-        'tkinter',
-        'unittest',
-        'pdb',
-        'pydoc',
-        'test',
-        'distutils',
-        # 排除不必要的第三方包
-        'numpy',
-        'matplotlib',
-        'PIL',
-        'pygame',
-        'cv2',
-        # 排除开发工具
-        'pip',
-        'setuptools',
-        'wheel',
-        # 排除不必要的网络库
-        'urllib3',
-        'requests',
-        'httpx',
+        # --- 标准库垃圾 ---
+        'tkinter', 'unittest', 'pdb', 'pydoc', 'test', 'distutils', 'email.test',
+
+        # --- 常用科学计算库 (如果有残留) ---
+        'numpy', 'matplotlib', 'pandas', 'scipy', 'PIL', 'cv2', 'pygame',
+
+        # --- 开发工具 ---
+        'pip', 'setuptools', 'wheel',
+
+        # --- PySide6/Qt 巨型无用模块 (关键减重区) ---
+        'PySide6.QtWebEngine',
+        'PySide6.QtWebEngineCore',
+        'PySide6.QtWebEngineWidgets',  # 浏览器内核，最大毒瘤
+        'PySide6.QtQml',
+        'PySide6.QtQuick',
+        'PySide6.QtQuickWidgets',      # QML 相关，用的是 QtWidgets，不需要这个
+        'PySide6.QtSql',               # 除非用了 QtSql，否则排除
+        'PySide6.QtTest',
+        'PySide6.QtDesigner',
+        'PySide6.QtHelp',
+        'PySide6.QtMultimedia',
+        'PySide6.QtMultimediaWidgets',
+        'PySide6.QtOpenGL',            # 简单的 GUI 不需要 OpenGL
+        'PySide6.QtOpenGLWidgets',
+        'PySide6.QtPositioning',
+        'PySide6.QtPrintSupport',
+        'PySide6.QtQuick3D',
+        'PySide6.QtSensors',
+        'PySide6.QtSerialPort',
+        'PySide6.QtSvg',               # 如果没用 SVG 图标可排除
+        'PySide6.QtSvgWidgets',
+        'PySide6.QtWebChannel',
+        'PySide6.QtWebSockets',
+        'PySide6.Qt3DCore',
+        'PySide6.Qt3DInput',
+        'PySide6.Qt3DLogic',
+        'PySide6.Qt3DRender',
+        'PySide6.QtCharts',
+        'PySide6.QtDataVisualization',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
 )
+
+# === 新增：暴力过滤 Qt 垃圾文件 ===
+def filter_qt_bloat(toc):
+    """过滤掉不需要的 Qt 文件"""
+    new_toc = []
+    for dest, source, type_ in toc:
+        # 1. 过滤翻译文件 (*.qm)，除非你需要多语言
+        if source and 'translations' in source and source.endswith('.qm'):
+            # 保留中文和英文(可选)
+            if 'zh_' not in source and 'en_' not in source:
+                continue
+
+        # 2. 过滤掉 imageformats 中不常用的格式
+        if 'imageformats' in dest:
+            # 只保留 jpg, png, ico
+            if not (dest.endswith('qjpeg.dll') or dest.endswith('qpng.dll') or dest.endswith('qico.dll')):
+                continue
+
+        # 3. 再次确保 WebEngine 相关的 DLL 不被打包 (双重保险)
+        if 'Qt6WebEngine' in dest or 'Qt6Quick' in dest or 'Qt6Qml' in dest or 'Qt6OpenGL' in dest:
+            continue
+
+        new_toc.append((dest, source, type_))
+    return new_toc
+
+# 应用过滤
+a.binaries = filter_qt_bloat(a.binaries)
+a.datas = filter_qt_bloat(a.datas)
+# ===================================
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
