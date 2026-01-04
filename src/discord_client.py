@@ -158,7 +158,7 @@ class AutoReplyClient(discord.Client):
                         message.channel.id in rule.target_channels):
                         # 使用轮换模式
                         success = await self.discord_manager.send_rotated_reply(
-                            message.channel, rule.reply, rule.keywords[0] if rule.keywords else ""
+                            message, rule.reply, rule.keywords[0] if rule.keywords else ""
                         )
                         if success:
                             success_msg = f"[{self.account.alias}] ✅ 轮换回复成功"
@@ -410,6 +410,10 @@ class DiscordManager:
         self.rotation_interval: int = 600  # 轮换间隔（秒），默认10分钟
         self.current_rotation_index: int = 0  # 当前使用的账号索引
 
+        # 消息去重跟踪 - 存储已回复的消息ID，避免重复回复
+        self.replied_messages: Set[int] = set()
+        self.max_replied_messages: int = 1000  # 最多跟踪1000条消息
+
     async def add_account_async(self, token: str) -> Tuple[bool, Optional[str]]:
         if any(acc.token == token for acc in self.accounts):
             return False, "Token已存在"
@@ -549,9 +553,15 @@ class DiscordManager:
         # 如果所有账号都被限制，返回None
         return None
 
-    async def send_rotated_reply(self, channel, reply_text: str, rule_name: str = "") -> bool:
+    async def send_rotated_reply(self, message, reply_text: str, rule_name: str = "") -> bool:
         """使用轮换账号发送回复"""
         if not self.rotation_enabled:
+            return False
+
+        # 检查这条消息是否已经被回复过
+        if message.id in self.replied_messages:
+            if self.log_callback:
+                self.log_callback(f"⚠️ 消息 {message.id} 已被回复，跳过轮换回复")
             return False
 
         account = self.get_next_available_account()
@@ -568,12 +578,23 @@ class DiscordManager:
             return False
 
         try:
+            # 标记这条消息已被回复
+            self.replied_messages.add(message.id)
+
+            # 清理过期的消息ID（保持内存使用合理）
+            if len(self.replied_messages) > self.max_replied_messages:
+                # 移除最旧的一半消息
+                sorted_messages = sorted(self.replied_messages)
+                remove_count = len(sorted_messages) // 2
+                for msg_id in sorted_messages[:remove_count]:
+                    self.replied_messages.remove(msg_id)
+
             # 更新账号的最后发送时间
             current_time = time.time()
             account.last_sent_time = current_time
 
             # 发送消息
-            await channel.send(reply_text)
+            await message.reply(reply_text)
 
             # 移动到下一个账号
             available_accounts = [acc for acc in self.accounts if acc.is_active and acc.is_valid]
@@ -599,7 +620,7 @@ class DiscordManager:
                     self.log_callback(f"❌ [{account.alias}] 发送失败: HTTP {e.code}")
 
             # 尝试下一个账号
-            return await self.send_rotated_reply(channel, reply_text, rule_name)
+            return await self.send_rotated_reply(message, reply_text, rule_name)
 
         except Exception as e:
             if self.log_callback:
