@@ -35,7 +35,7 @@ class Account:
     @property
     def alias(self) -> str:
         """获取账号别名（使用用户名）"""
-        if self.user_info:
+        if self.user_info and isinstance(self.user_info, dict):
             return f"{self.user_info.get('name', 'Unknown')}#{self.user_info.get('discriminator', '0000')}"
         return f"Token-{self.token[:8]}..."
 
@@ -309,7 +309,7 @@ class TokenValidator:
                                 'id': data.get('id'),
                                 'name': data.get('username'),
                                 'discriminator': data.get('discriminator', '0000'),
-                                'avatar_url': f"https://cdn.discordapp.com/avatars/{data['id']}/{data['avatar']}.png" if data.get('avatar') else None,
+                                'avatar_url': f"https://cdn.discordapp.com/avatars/{data.get('id', 'unknown')}/{data.get('avatar', 'unknown')}.png" if data.get('avatar') else None,
                                 'bot': data.get('bot', False),
                                 'token_type': 'bot' if data.get('bot') else 'user'
                             }
@@ -427,12 +427,8 @@ class DiscordManager:
 
         self.accounts.append(account)
 
-        return True, "账号添加成功" + (f" ({user_info['name']})" if user_info else "")
+        return True, "账号添加成功" + (f" ({user_info.get('name', 'Unknown')})" if user_info and isinstance(user_info, dict) else "")
 
-    def add_account(self, token: str, alias: str):
-        """添加账号（同步版本，用于向后兼容）"""
-        account = Account(token=token, alias=alias)
-        self.accounts.append(account)
 
     def remove_account(self, token: str):
         """移除账号"""
@@ -623,8 +619,8 @@ class DiscordManager:
         account.last_verified = time.time()
         account.user_info = user_info
 
-        if is_valid and user_info:
-            username = f"{user_info['name']}#{user_info['discriminator']}"
+        if is_valid and user_info and isinstance(user_info, dict):
+            username = f"{user_info.get('name', 'Unknown')}#{user_info.get('discriminator', '0000')}"
             return True, f"验证成功，用户名: {username}"
         else:
             return False, f"验证失败: {error_msg}"
