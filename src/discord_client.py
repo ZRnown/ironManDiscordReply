@@ -407,7 +407,7 @@ class DiscordManager:
 
         # 轮换设置
         self.rotation_enabled: bool = False  # 是否启用账号轮换
-        self.rotation_interval: int = 600  # 轮换间隔（秒），默认10分钟
+        self.rotation_interval: int = 10  # 轮换间隔（秒），默认10秒
         self.current_rotation_index: int = 0  # 当前使用的账号索引
 
         # 消息去重跟踪 - 存储已回复的消息ID，避免重复回复

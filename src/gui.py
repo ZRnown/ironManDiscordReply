@@ -751,11 +751,11 @@ class MainWindow(QMainWindow):
 
         # 轮换间隔设置
         interval_layout = QHBoxLayout()
-        interval_layout.addWidget(QLabel("轮换间隔(分钟):"))
+        interval_layout.addWidget(QLabel("轮换间隔(秒):"))
         self.rotation_interval_spin = QSpinBox()
-        self.rotation_interval_spin.setRange(1, 1440)  # 1分钟到24小时
-        self.rotation_interval_spin.setValue(10)  # 默认10分钟
-        self.rotation_interval_spin.setSuffix("分钟")
+        self.rotation_interval_spin.setRange(1, 3600)  # 1秒到1小时
+        self.rotation_interval_spin.setValue(10)  # 默认10秒
+        self.rotation_interval_spin.setSuffix("秒")
         self.rotation_interval_spin.setEnabled(False)  # 默认禁用
         interval_layout.addWidget(self.rotation_interval_spin)
         interval_layout.addStretch()
@@ -1594,8 +1594,8 @@ class MainWindow(QMainWindow):
         # 更新DiscordManager设置
         self.discord_manager.rotation_enabled = enabled
         if enabled:
-            self.discord_manager.rotation_interval = self.rotation_interval_spin.value() * 60  # 转换为秒
-            self.rotation_status_label.setText(f"轮换模式: 已启用 (间隔{self.rotation_interval_spin.value()}分钟)")
+            self.discord_manager.rotation_interval = self.rotation_interval_spin.value()  # 直接使用秒
+            self.rotation_status_label.setText(f"轮换模式: 已启用 (间隔{self.rotation_interval_spin.value()}秒)")
         else:
             self.rotation_status_label.setText("轮换模式: 未启用")
 
