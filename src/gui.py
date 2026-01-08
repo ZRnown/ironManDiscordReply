@@ -1,5 +1,6 @@
 import sys
 import asyncio
+import os
 from typing import List, Optional
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -11,6 +12,9 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QFont, QIcon, QColor
+
+# 添加src目录到Python路径（确保打包后能找到模块）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from discord_client import DiscordManager, Account, Rule, MatchType
 from config_manager import ConfigManager

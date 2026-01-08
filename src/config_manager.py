@@ -1,7 +1,12 @@
 import json
 import os
+import sys
 from typing import List, Dict, Any
 from dataclasses import asdict
+
+# 添加src目录到Python路径（确保打包后能找到模块）
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from discord_client import Account, Rule, MatchType
 
 
