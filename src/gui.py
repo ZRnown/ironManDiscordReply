@@ -374,13 +374,23 @@ class RuleDialog(QDialog):
         self.ignore_mentions_checkbox = QCheckBox("忽略@消息")
         self.ignore_mentions_checkbox.setToolTip("启用后，当消息中包含@他人时，不会回复这条消息")
         self.ignore_mentions_checkbox.setChecked(True if not self.rule else getattr(self.rule, 'ignore_mentions', False))
+        layout.addWidget(self.ignore_mentions_checkbox)
+
+        # 过滤关键词
+        exclude_layout = QVBoxLayout()
+        exclude_layout.addWidget(QLabel("过滤关键词 (可选):"))
+        self.exclude_keywords_input = QLineEdit()
+        self.exclude_keywords_input.setPlaceholderText("逗号分隔，如 http, discord.gg")
+        if self.rule:
+            self.exclude_keywords_input.setText(", ".join(getattr(self.rule, 'exclude_keywords', [])))
+        exclude_layout.addWidget(self.exclude_keywords_input)
+        layout.addLayout(exclude_layout)
 
         # 大小写敏感
         self.case_sensitive_checkbox = QCheckBox("不区分大小写")
         self.case_sensitive_checkbox.setToolTip("启用后，关键词匹配将不区分大小写；关闭后，将区分大小写")
         self.case_sensitive_checkbox.setChecked(True if not self.rule else not getattr(self.rule, 'case_sensitive', False))
         layout.addWidget(self.case_sensitive_checkbox)
-        layout.addWidget(self.ignore_mentions_checkbox)
 
         # 按钮
         buttons_layout = QHBoxLayout()
@@ -424,7 +434,9 @@ class RuleDialog(QDialog):
             'is_active': self.active_checkbox.isChecked(),
             'ignore_replies': self.ignore_replies_checkbox.isChecked(),
             'ignore_mentions': self.ignore_mentions_checkbox.isChecked(),
-            'case_sensitive': not self.case_sensitive_checkbox.isChecked(),        }
+            'case_sensitive': not self.case_sensitive_checkbox.isChecked(),
+            'exclude_keywords': [k.strip() for k in self.exclude_keywords_input.text().split(",") if k.strip()],
+        }
 
 
 class WorkerThread(QThread):
@@ -554,8 +566,17 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.discord_manager = DiscordManager(log_callback=self.add_log_thread_safe)
+        # 初始化图片搜索管理器（如果可用）
+        self.image_search_manager = None
+        self._init_image_search()
+
+        self.discord_manager = DiscordManager(log_callback=self.add_log_thread_safe, image_search_manager=self.image_search_manager)
         self.config_manager = ConfigManager()
+
+        # 初始化图片搜索管理器
+        self.image_search_manager = None
+        self._init_image_search()
+
         self.worker_thread = None
 
         self.init_ui()
@@ -563,6 +584,47 @@ class MainWindow(QMainWindow):
 
         # 连接日志信号
         self.log_signal.connect(self.add_log)
+
+    def _init_image_search(self):
+        """初始化图片搜索功能"""
+        try:
+            from config.image_search_config import get_config
+            config = get_config()
+
+            enabled = config.get('enabled', False)
+            print(f"图片搜索配置: enabled={enabled}")
+
+            if enabled:
+                print("图片搜索功能已启用，延迟初始化以避免冲突...")
+                # 延迟初始化，避免与Qt事件循环冲突
+                self.image_search_manager = None
+                # 在需要时再初始化
+                QTimer.singleShot(1000, self._delayed_init_image_search)
+            else:
+                print("图片搜索功能已禁用")
+                self.image_search_manager = None
+        except Exception as e:
+            print(f"图片搜索配置加载失败: {e}")
+            self.image_search_manager = None
+
+    def _delayed_init_image_search(self):
+        """延迟初始化图片搜索功能"""
+        try:
+            from image_search import get_image_search_manager
+            from config.image_search_config import get_config
+
+            config = get_config()
+            self.image_search_manager = get_image_search_manager()
+
+            if not self.image_search_manager.initialize(config):
+                self.add_log("图片搜索功能初始化失败", "warning")
+                self.image_search_manager = None
+            else:
+                self.add_log("图片搜索功能初始化成功", "success")
+
+        except Exception as e:
+            self.add_log(f"图片搜索延迟初始化失败: {e}", "error")
+            self.image_search_manager = None
 
     def init_ui(self):
         """初始化用户界面"""
@@ -701,8 +763,8 @@ class MainWindow(QMainWindow):
 
         # 规则表格
         self.rules_table = QTableWidget()
-        self.rules_table.setColumnCount(8)
-        self.rules_table.setHorizontalHeaderLabels(["关键词", "回复内容", "匹配类型", "频道", "延迟", "忽略回复", "忽略@", "操作"])
+        self.rules_table.setColumnCount(9)
+        self.rules_table.setHorizontalHeaderLabels(["关键词", "回复内容", "匹配类型", "频道", "延迟", "忽略回复", "忽略@", "过滤关键词", "操作"])
         self.rules_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.rules_table.setAlternatingRowColors(True)
         self.rules_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -987,6 +1049,18 @@ class MainWindow(QMainWindow):
             mentions_item.setData(Qt.ItemDataRole.ToolTipRole, "是否忽略包含@他人的消息")
             self.rules_table.setItem(row, 6, mentions_item)
 
+            # 过滤关键词
+            exclude_keywords = getattr(rule, 'exclude_keywords', [])
+            if exclude_keywords:
+                exclude_display = ", ".join(exclude_keywords[:2])
+                if len(exclude_keywords) > 2:
+                    exclude_display += "..."
+            else:
+                exclude_display = "无"
+            exclude_item = QTableWidgetItem(exclude_display)
+            exclude_item.setToolTip(", ".join(exclude_keywords) if exclude_keywords else "无过滤关键词")
+            self.rules_table.setItem(row, 7, exclude_item)
+
             # 操作按钮
             edit_btn = QPushButton("编辑")
             edit_btn.clicked.connect(lambda checked, index=row: self.edit_rule_by_index(index))
@@ -1002,7 +1076,7 @@ class MainWindow(QMainWindow):
             button_layout.addWidget(delete_btn)
             button_layout.addStretch()
 
-            self.rules_table.setCellWidget(row, 7, button_widget)
+            self.rules_table.setCellWidget(row, 8, button_widget)
 
         # 更新统计信息
         total_rules = len(self.discord_manager.rules)
@@ -1398,7 +1472,9 @@ class MainWindow(QMainWindow):
                 data['delay_min'],
                 data['delay_max'],
                 data.get('ignore_replies', False),
-                data.get('ignore_mentions', False)
+                data.get('ignore_mentions', False),
+                data.get('case_sensitive', False),
+                data.get('exclude_keywords', [])
             )
 
             # 设置激活状态
@@ -1432,7 +1508,8 @@ class MainWindow(QMainWindow):
                     is_active=data['is_active'],
                     ignore_replies=data.get('ignore_replies', False),
                     ignore_mentions=data.get('ignore_mentions', False),
-                    case_sensitive=data.get('case_sensitive', False)
+                    case_sensitive=data.get('case_sensitive', False),
+                    exclude_keywords=data.get('exclude_keywords', [])
                 )
 
                 self.update_rules_list()

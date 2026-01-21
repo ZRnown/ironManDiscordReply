@@ -47,7 +47,8 @@ class ConfigManager:
                     "is_active": rule.is_active,
                     "ignore_replies": getattr(rule, 'ignore_replies', False),
                     "ignore_mentions": getattr(rule, 'ignore_mentions', False),
-                    "case_sensitive": getattr(rule, 'case_sensitive', False)
+                    "case_sensitive": getattr(rule, 'case_sensitive', False),
+                    "exclude_keywords": getattr(rule, 'exclude_keywords', [])
                 }
                 for rule in rules
             ]
@@ -84,6 +85,9 @@ class ConfigManager:
 
             rules = []
             for rule_data in config_data.get("rules", []):
+                exclude_keywords = rule_data.get("exclude_keywords", [])
+                if isinstance(exclude_keywords, str):
+                    exclude_keywords = [exclude_keywords]
                 rule = Rule(
                     id=rule_data.get("id", f"rule_{len(rules)}"),  # 如果没有id，生成一个
                     keywords=rule_data["keywords"],
@@ -95,7 +99,8 @@ class ConfigManager:
                     is_active=rule_data.get("is_active", True),
                     ignore_replies=rule_data.get("ignore_replies", False),
                     ignore_mentions=rule_data.get("ignore_mentions", False),
-                    case_sensitive=rule_data.get("case_sensitive", False)
+                    case_sensitive=rule_data.get("case_sensitive", False),
+                    exclude_keywords=exclude_keywords
                 )
                 rules.append(rule)
 
@@ -128,7 +133,8 @@ class ConfigManager:
                         "is_active": rule.is_active,
                         "ignore_replies": getattr(rule, 'ignore_replies', False),
                         "ignore_mentions": getattr(rule, 'ignore_mentions', False),
-                        "case_sensitive": getattr(rule, 'case_sensitive', False)
+                        "case_sensitive": getattr(rule, 'case_sensitive', False),
+                        "exclude_keywords": getattr(rule, 'exclude_keywords', [])
                     }
                     for rule in rules
                 ]
@@ -161,6 +167,9 @@ class ConfigManager:
 
             rules = []
             for rule_data in config_data.get("rules", []):
+                exclude_keywords = rule_data.get("exclude_keywords", [])
+                if isinstance(exclude_keywords, str):
+                    exclude_keywords = [exclude_keywords]
                 rule = Rule(
                     id=rule_data.get("id", f"rule_{len(rules)}"),  # 如果没有id，生成一个
                     keywords=rule_data["keywords"],
@@ -172,7 +181,8 @@ class ConfigManager:
                     is_active=rule_data.get("is_active", True),
                     ignore_replies=rule_data.get("ignore_replies", False),
                     ignore_mentions=rule_data.get("ignore_mentions", False),
-                    case_sensitive=rule_data.get("case_sensitive", False)
+                    case_sensitive=rule_data.get("case_sensitive", False),
+                    exclude_keywords=exclude_keywords
                 )
                 rules.append(rule)
 

@@ -5,7 +5,7 @@ import random
 import time
 import logging
 from typing import List, Dict, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 # discord.py-self 不需要Intents
@@ -53,10 +53,11 @@ class Rule:
     ignore_replies: bool = True  # 是否忽略回复他人的消息
     ignore_mentions: bool = True  # 是否忽略包含@他人的消息
     case_sensitive: bool = False  # 是否区分大小写，False表示不区分大小写
+    exclude_keywords: List[str] = field(default_factory=list)  # 触发后不回复的过滤关键词
 
 
 class AutoReplyClient(discord.Client):
-    def __init__(self, account: Account, rules: List[Rule], log_callback=None, discord_manager=None, *args, **kwargs):
+    def __init__(self, account: Account, rules: List[Rule], log_callback=None, discord_manager=None, image_search_manager=None, *args, **kwargs):
         # 修正: discord.py-self 不需要也不支持 intents 参数
         # 直接调用父类构造函数即可
         super().__init__(*args, **kwargs)
@@ -66,6 +67,7 @@ class AutoReplyClient(discord.Client):
         self.is_running = False
         self.log_callback = log_callback
         self.discord_manager = discord_manager
+        self.image_search_manager = image_search_manager
 
     async def on_ready(self):
         try:
@@ -128,6 +130,9 @@ class AutoReplyClient(discord.Client):
             if rule.ignore_mentions and message.mentions:
                 continue
 
+            if self._is_filtered_message(message.content, rule):
+                continue
+
             if self._check_match(message.content, rule):
                 match_msg = f"[{self.account.alias}] 🎯 匹配到关键词 | 消息: '{message.content}' | 来自: {message.author.name} | 频道: #{message.channel.name}"
                 reply_msg = f"[{self.account.alias}] 🤖 准备回复: '{rule.reply}'"
@@ -188,6 +193,70 @@ class AutoReplyClient(discord.Client):
 
                 break
 
+            # 检查是否有图片附件并进行搜索
+            if self.image_search_manager and message.attachments:
+                await self._process_image_attachments(message)
+
+    async def _process_image_attachments(self, message):
+        """处理消息中的图片附件"""
+        try:
+            import aiohttp
+            from config.image_search_config import get_config
+
+            config = get_config()
+            if not config.get('auto_search_images', True):
+                return
+
+            for attachment in message.attachments:
+                # 检查是否是图片
+                if not attachment.content_type or not attachment.content_type.startswith('image/'):
+                    continue
+
+                try:
+                    # 下载图片
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(attachment.url) as resp:
+                            if resp.status == 200:
+                                image_data = await resp.read()
+
+                                # 搜索相似图片
+                                search_results = self.image_search_manager.search_similar(image_data=image_data)
+
+                                if search_results:
+                                    # 过滤低相似度结果
+                                    threshold = config.get('reply_similarity_threshold', 0.85)
+                                    valid_results = [r for r in search_results if r['similarity'] >= threshold]
+
+                                    if valid_results:
+                                        # 构建回复内容
+                                        keywords_list = []
+                                        for result in valid_results[:config.get('max_reply_keywords', 3)]:
+                                            keywords_list.append(result['keywords'])
+
+                                        keywords_text = ', '.join(keywords_list)
+                                        reply_text = config.get('reply_template', "我找到了相似图片！关键词：{keywords}").format(keywords=keywords_text)
+
+                                        # 发送回复
+                                        await message.reply(reply_text)
+
+                                        success_msg = f"[{self.account.alias}] 🖼️ 图片搜索成功 - 匹配关键词: {keywords_text}"
+                                        print(success_msg)
+                                        if self.log_callback:
+                                            self.log_callback(success_msg)
+                                        break  # 只回复第一个匹配的图片
+
+                except Exception as e:
+                    error_msg = f"[{self.account.alias}] 图片搜索失败: {e}"
+                    print(error_msg)
+                    if self.log_callback:
+                        self.log_callback(error_msg)
+
+        except Exception as e:
+            error_msg = f"[{self.account.alias}] 图片附件处理异常: {e}"
+            print(error_msg)
+            if self.log_callback:
+                self.log_callback(error_msg)
+
     def _check_match(self, content: str, rule: Rule) -> bool:
         """检查消息内容是否匹配规则"""
         if not content:
@@ -214,6 +283,17 @@ class AutoReplyClient(discord.Client):
             return any(re.search(keyword, content, flags) for keyword in rule.keywords)
 
         return False
+
+    def _is_filtered_message(self, content: str, rule: Rule) -> bool:
+        """检查消息是否命中过滤关键词"""
+        if not content or not rule.exclude_keywords:
+            return False
+
+        if rule.case_sensitive:
+            return any(keyword in content for keyword in rule.exclude_keywords)
+
+        content_lower = content.lower()
+        return any(keyword.lower() in content_lower for keyword in rule.exclude_keywords)
 
     async def start_client(self):
         try:
@@ -397,13 +477,14 @@ class TokenValidator:
 
 
 class DiscordManager:
-    def __init__(self, log_callback=None):
+    def __init__(self, log_callback=None, image_search_manager=None):
         self.clients: List[AutoReplyClient] = []
         self.accounts: List[Account] = []
         self.rules: List[Rule] = []
         self.is_running = False
         self.validator = TokenValidator()
         self.log_callback = log_callback
+        self.image_search_manager = image_search_manager
 
         # 轮换设置
         self.rotation_enabled: bool = False  # 是否启用账号轮换
@@ -441,7 +522,7 @@ class DiscordManager:
     def add_rule(self, keywords: List[str], reply: str, match_type: MatchType,
                  target_channels: List[int], delay_min: float = 0.1, delay_max: float = 1.0,
                  ignore_replies: bool = True, ignore_mentions: bool = True,
-                 case_sensitive: bool = False):
+                 case_sensitive: bool = False, exclude_keywords: Optional[List[str]] = None):
         """添加规则"""
         # 生成唯一的规则ID
         import time
@@ -457,7 +538,8 @@ class DiscordManager:
             delay_max=delay_max,
             ignore_replies=ignore_replies,
             ignore_mentions=ignore_mentions,
-            case_sensitive=case_sensitive
+            case_sensitive=case_sensitive,
+            exclude_keywords=exclude_keywords or []
         )
         self.rules.append(rule)
 
@@ -485,7 +567,7 @@ class DiscordManager:
         for acc in self.accounts:
             if acc.is_active and acc.is_valid:
                 rules = [r for r in self.rules if r.id in acc.rule_ids]
-                client = AutoReplyClient(acc, rules, self.log_callback, self)
+                client = AutoReplyClient(acc, rules, self.log_callback, self, self.image_search_manager)
                 self.clients.append(client)
                 # 创建启动任务，让它们在后台运行
                 asyncio.create_task(client.start_client())
