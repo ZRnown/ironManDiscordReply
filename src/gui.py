@@ -566,16 +566,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        # 初始化图片搜索管理器（如果可用）
-        self.image_search_manager = None
-        self._init_image_search()
-
-        self.discord_manager = DiscordManager(log_callback=self.add_log_thread_safe, image_search_manager=self.image_search_manager)
+        self.discord_manager = DiscordManager(log_callback=self.add_log_thread_safe)
         self.config_manager = ConfigManager()
-
-        # 初始化图片搜索管理器
-        self.image_search_manager = None
-        self._init_image_search()
 
         self.worker_thread = None
 
@@ -584,47 +576,6 @@ class MainWindow(QMainWindow):
 
         # 连接日志信号
         self.log_signal.connect(self.add_log)
-
-    def _init_image_search(self):
-        """初始化图片搜索功能"""
-        try:
-            from config.image_search_config import get_config
-            config = get_config()
-
-            enabled = config.get('enabled', False)
-            print(f"图片搜索配置: enabled={enabled}")
-
-            if enabled:
-                print("图片搜索功能已启用，延迟初始化以避免冲突...")
-                # 延迟初始化，避免与Qt事件循环冲突
-                self.image_search_manager = None
-                # 在需要时再初始化
-                QTimer.singleShot(1000, self._delayed_init_image_search)
-            else:
-                print("图片搜索功能已禁用")
-                self.image_search_manager = None
-        except Exception as e:
-            print(f"图片搜索配置加载失败: {e}")
-            self.image_search_manager = None
-
-    def _delayed_init_image_search(self):
-        """延迟初始化图片搜索功能"""
-        try:
-            from image_search import get_image_search_manager
-            from config.image_search_config import get_config
-
-            config = get_config()
-            self.image_search_manager = get_image_search_manager()
-
-            if not self.image_search_manager.initialize(config):
-                self.add_log("图片搜索功能初始化失败", "warning")
-                self.image_search_manager = None
-            else:
-                self.add_log("图片搜索功能初始化成功", "success")
-
-        except Exception as e:
-            self.add_log(f"图片搜索延迟初始化失败: {e}", "error")
-            self.image_search_manager = None
 
     def init_ui(self):
         """初始化用户界面"""

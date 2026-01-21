@@ -23,7 +23,7 @@ jobs:
     - name: Cache pip dependencies
       uses: actions/cache@v4
       with:
-        path: ~/.cache/pip
+        path: ~\AppData\Local\pip\Cache
         key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
         restore-keys: |
           ${{ runner.os }}-pip-
@@ -31,10 +31,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install discord.py-self
-        pip install PySide6
-        pip install pyinstaller
-        pip install typing-extensions
+        pip install -r requirements.txt
 
     - name: Create config directory
       run: |
@@ -71,7 +68,6 @@ jobs:
         name: DiscordAutoReply-Windows
         path: |
           dist/DiscordAutoReply.exe
-          Windows使用说明.md
         retention-days: 30
         if-no-files-found: warn
 
@@ -81,7 +77,6 @@ jobs:
       with:
         files: |
           dist/DiscordAutoReply.exe
-          Windows使用说明.md
         body: |
           ## Windows自动回复工具
 
@@ -89,7 +84,6 @@ jobs:
 
           ### 下载
           - `DiscordAutoReply.exe` - 主程序
-          - `Windows使用说明.md` - 详细使用指南
 
           ### 安装说明
           1. 下载 `DiscordAutoReply.exe`

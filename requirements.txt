@@ -1,12 +1,5 @@
 discord.py-self==2.0.1
 PySide6==6.8.0.2
 pyinstaller==6.3.0
-
-# 图片搜索相关依赖
-torch>=2.0.0
-transformers>=4.21.0
-faiss-cpu>=1.7.0
-Pillow>=9.0.0
-ultralytics>=8.0.0
 aiohttp>=3.8.0
-numpy>=1.21.0
+typing-extensions>=4.0.0

@@ -26,6 +26,7 @@ wheels/
 
 # Discord tokens and config (sensitive data)
 config/config.json
+config/image_database.json
 *.token
 *tokens*
 
@@ -48,7 +49,16 @@ Thumbs.db
 # Logs
 *.log
 logs/
+debug/
+
+# Model artifacts / large files
+models/
+*.pt
+*.bin
+*.safetensors
+*.onnx
 
 # Temporary files
 *.tmp
 *.temp
+temp_preview_*.jpg
