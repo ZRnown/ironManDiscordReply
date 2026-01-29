@@ -1,6 +1,7 @@
 import sys
 import asyncio
 import os
+import re
 from typing import List, Optional
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -294,7 +295,7 @@ class RuleDialog(QDialog):
         keywords_layout = QHBoxLayout()
         keywords_layout.addWidget(QLabel("关键词:"))
         self.keywords_input = QLineEdit()
-        self.keywords_input.setPlaceholderText("用逗号分隔多个关键词")
+        self.keywords_input.setPlaceholderText("用逗号分隔（支持中文逗号）多个关键词")
         if self.rule:
             self.keywords_input.setText(", ".join(self.rule.keywords))
         keywords_layout.addWidget(self.keywords_input)
@@ -380,16 +381,16 @@ class RuleDialog(QDialog):
         exclude_layout = QVBoxLayout()
         exclude_layout.addWidget(QLabel("过滤关键词 (可选):"))
         self.exclude_keywords_input = QLineEdit()
-        self.exclude_keywords_input.setPlaceholderText("逗号分隔，如 http, discord.gg")
+        self.exclude_keywords_input.setPlaceholderText("逗号分隔（支持中文逗号），如 http, discord.gg")
         if self.rule:
             self.exclude_keywords_input.setText(", ".join(getattr(self.rule, 'exclude_keywords', [])))
         exclude_layout.addWidget(self.exclude_keywords_input)
         layout.addLayout(exclude_layout)
 
         # 大小写敏感
-        self.case_sensitive_checkbox = QCheckBox("不区分大小写")
-        self.case_sensitive_checkbox.setToolTip("启用后，关键词匹配将不区分大小写；关闭后，将区分大小写")
-        self.case_sensitive_checkbox.setChecked(True if not self.rule else not getattr(self.rule, 'case_sensitive', False))
+        self.case_sensitive_checkbox = QCheckBox("区分大小写")
+        self.case_sensitive_checkbox.setToolTip("启用后，关键词和过滤词匹配将区分大小写")
+        self.case_sensitive_checkbox.setChecked(False if not self.rule else getattr(self.rule, 'case_sensitive', False))
         layout.addWidget(self.case_sensitive_checkbox)
 
         # 按钮
@@ -424,8 +425,11 @@ class RuleDialog(QDialog):
             except ValueError:
                 pass  # 忽略无效的频道ID
 
+        def split_keywords(text: str) -> List[str]:
+            return [k.strip() for k in re.split(r"[,\n，;；]+", text) if k.strip()]
+
         return {
-            'keywords': [k.strip() for k in self.keywords_input.text().split(",") if k.strip()],
+            'keywords': split_keywords(self.keywords_input.text()),
             'reply': self.reply_input.toPlainText().strip(),
             'match_type': match_type_map[self.match_type_combo.currentIndex()],
             'target_channels': target_channels,
@@ -434,8 +438,8 @@ class RuleDialog(QDialog):
             'is_active': self.active_checkbox.isChecked(),
             'ignore_replies': self.ignore_replies_checkbox.isChecked(),
             'ignore_mentions': self.ignore_mentions_checkbox.isChecked(),
-            'case_sensitive': not self.case_sensitive_checkbox.isChecked(),
-            'exclude_keywords': [k.strip() for k in self.exclude_keywords_input.text().split(",") if k.strip()],
+            'case_sensitive': self.case_sensitive_checkbox.isChecked(),
+            'exclude_keywords': split_keywords(self.exclude_keywords_input.text()),
         }
 
 
