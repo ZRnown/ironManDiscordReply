@@ -67,6 +67,8 @@ class AutoReplyClient(discord.Client):
         self.is_running = False
         self.log_callback = log_callback
         self.discord_manager = discord_manager
+        self.startup_complete = asyncio.Event()
+        self.startup_error: Optional[str] = None
 
     async def on_ready(self):
         try:
@@ -95,12 +97,16 @@ class AutoReplyClient(discord.Client):
                 'discriminator': discriminator,
                 'bot': getattr(self.user, 'bot', False)
             }
+            self.startup_error = None
+            self.startup_complete.set()
 
         except Exception as e:
             error_msg = f"[{self.account.alias}] on_ready事件错误: {e}"
             print(error_msg)
             if self.log_callback:
                 self.log_callback(error_msg)
+            self.startup_error = error_msg
+            self.startup_complete.set()
             self.is_running = False
 
     async def on_message(self, message):
@@ -231,42 +237,68 @@ class AutoReplyClient(discord.Client):
         return any(keyword.lower() in content_lower for keyword in rule.exclude_keywords)
 
     async def start_client(self):
-        try:
-            self.is_running = False
+        self.is_running = False
+        self.startup_error = None
+        self.startup_complete.clear()
 
-            # 启动客户端
+        try:
             await self.start(self.account.token)
 
-            # 等待on_ready事件，最多等待10秒
-            try:
-                await asyncio.wait_for(self.wait_for('ready', timeout=10.0), timeout=10.0)
-                # 如果能到达这里，说明on_ready已经成功执行，is_running已经被设置为True
-            except asyncio.TimeoutError:
-                error_msg = f"[{self.account.alias}] 连接超时：等待ready事件超时"
-                print(error_msg)
-                if self.log_callback:
-                    self.log_callback(error_msg)
-                self.is_running = False
-                await self.close()
+            if not self.startup_complete.is_set():
+                self.startup_complete.set()
 
         except discord.LoginFailure as e:
             error_msg = f"[{self.account.alias}] 登录失败: Token无效 - {e}"
             print(error_msg)
             if self.log_callback:
                 self.log_callback(error_msg)
+            self.startup_error = error_msg
+            self.startup_complete.set()
             self.is_running = False
+
+        except asyncio.CancelledError:
+            if not self.startup_complete.is_set():
+                self.startup_complete.set()
+            self.is_running = False
+            raise
 
         except Exception as e:
             error_msg = f"[{self.account.alias}] 启动失败: {e}"
             print(error_msg)
             if self.log_callback:
                 self.log_callback(error_msg)
+            self.startup_error = error_msg
+            self.startup_complete.set()
             self.is_running = False
+
+        finally:
+            if self.is_closed():
+                self.is_running = False
+
+    async def wait_for_startup(self, timeout: float) -> bool:
+        try:
+            await asyncio.wait_for(self.startup_complete.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            error_msg = f"[{self.account.alias}] 连接超时：{int(timeout)}秒内未完成登录"
+            print(error_msg)
+            if self.log_callback:
+                self.log_callback(error_msg)
+            self.startup_error = error_msg
+            self.is_running = False
+            self.startup_complete.set()
+            if not self.is_closed():
+                await self.close()
+            return False
+
+        return self.is_running
 
     async def stop_client(self):
         """停止客户端"""
         self.is_running = False
-        await self.close()
+        if not self.startup_complete.is_set():
+            self.startup_complete.set()
+        if not self.is_closed():
+            await self.close()
 
 
 class TokenValidator:
@@ -414,11 +446,14 @@ class TokenValidator:
 class DiscordManager:
     def __init__(self, log_callback=None):
         self.clients: List[AutoReplyClient] = []
+        self.client_tasks: Dict[str, asyncio.Task] = {}
         self.accounts: List[Account] = []
         self.rules: List[Rule] = []
         self.is_running = False
         self.validator = TokenValidator()
         self.log_callback = log_callback
+        self.max_parallel_starts: int = 10
+        self.startup_timeout: float = 20.0
 
         # 轮换设置
         self.rotation_enabled: bool = False  # 是否启用账号轮换
@@ -491,30 +526,77 @@ class DiscordManager:
                     setattr(rule, key, value)
 
     async def start_all_clients(self):
-        if self.is_running: return
-
-        self.is_running = True
+        if self.is_running:
+            return
 
         await self.stop_all_clients()
         self.clients.clear()
+
+        self.is_running = True
+
+        active_clients: List[AutoReplyClient] = []
 
         for acc in self.accounts:
             if acc.is_active and acc.is_valid:
                 rules = [r for r in self.rules if r.id in acc.rule_ids]
                 client = AutoReplyClient(acc, rules, self.log_callback, self)
                 self.clients.append(client)
-                # 创建启动任务，让它们在后台运行
-                asyncio.create_task(client.start_client())
+                active_clients.append(client)
 
-        # 不在这里检查状态，让调用者负责等待和状态检查
+        total_clients = len(active_clients)
+        if total_clients == 0:
+            self.is_running = False
+            return
+
+        for batch_start in range(0, total_clients, self.max_parallel_starts):
+            batch_clients = active_clients[batch_start:batch_start + self.max_parallel_starts]
+
+            for client in batch_clients:
+                task = asyncio.create_task(client.start_client())
+                self._track_client_task(client.account.token, task)
+
+            await asyncio.gather(
+                *(client.wait_for_startup(self.startup_timeout) for client in batch_clients),
+                return_exceptions=True,
+            )
+
+            completed_count = min(batch_start + len(batch_clients), total_clients)
+            if completed_count < total_clients and self.log_callback:
+                self.log_callback(
+                    f"📦 已完成 {completed_count}/{total_clients} 个账号连接尝试，继续分批启动..."
+                )
 
     async def stop_all_clients(self):
         self.is_running = False
 
-        for c in self.clients:
-            await c.stop_client()
+        tracked_tasks = list(self.client_tasks.values())
 
+        for c in self.clients:
+            try:
+                await c.stop_client()
+            except Exception as e:
+                if self.log_callback:
+                    self.log_callback(f"停止账号 {c.account.alias} 时出错: {e}")
+
+        if tracked_tasks:
+            try:
+                await asyncio.wait_for(asyncio.gather(*tracked_tasks, return_exceptions=True), timeout=10.0)
+            except asyncio.TimeoutError:
+                for task in tracked_tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tracked_tasks, return_exceptions=True)
+
+        self.client_tasks.clear()
         self.clients.clear()
+
+    def _track_client_task(self, token: str, task: asyncio.Task):
+        self.client_tasks[token] = task
+
+        def _cleanup(completed_task: asyncio.Task, account_token: str = token):
+            self.client_tasks.pop(account_token, None)
+
+        task.add_done_callback(_cleanup)
 
     async def revalidate_all_accounts(self) -> List[Dict]:
         """重新验证所有账号的Token"""

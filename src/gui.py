@@ -1,7 +1,7 @@
 import sys
 import asyncio
 import os
-import re
+import time
 from typing import List, Optional
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -9,9 +9,9 @@ from PySide6.QtWidgets import (
     QLineEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox,
     QCheckBox, QGroupBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QMessageBox, QFileDialog, QSplitter, QProgressBar,
-    QDialog, QMenu, QScrollArea
+    QDialog, QMenu, QScrollArea, QAbstractItemView
 )
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QItemSelectionModel
 from PySide6.QtGui import QFont, QIcon, QColor
 
 # 添加src目录到Python路径（确保打包后能找到模块）
@@ -19,6 +19,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from discord_client import DiscordManager, Account, Rule, MatchType
 from config_manager import ConfigManager
+from gui_helpers import (
+    build_row_selection_range,
+    move_item_in_list,
+    parse_selection_ranges,
+    replace_item_preserving_order,
+    split_keywords,
+)
 
 
 class AccountDialog(QDialog):
@@ -28,6 +35,9 @@ class AccountDialog(QDialog):
         self.account = account
         self.discord_manager = discord_manager
         self.is_validating = False
+        self.current_user_info = account.user_info if account else None
+        self.current_is_valid = account.is_valid if account else False
+        self.current_last_verified = account.last_verified if account else None
         self.init_ui()
 
     def init_ui(self):
@@ -105,12 +115,15 @@ class AccountDialog(QDialog):
         if not self.is_validating:
             self.status_label.setText("")
             self.status_label.setStyleSheet("color: gray; font-style: italic;")
+            self.current_user_info = None
+            self.current_is_valid = False
+            self.current_last_verified = None
 
     def update_validation_status(self):
         """更新验证状态显示"""
-        if self.account and self.account.last_verified:
-            if self.account.is_valid and self.account.user_info and isinstance(self.account.user_info, dict):
-                user_info = self.account.user_info
+        if self.current_last_verified:
+            if self.current_is_valid and self.current_user_info and isinstance(self.current_user_info, dict):
+                user_info = self.current_user_info
                 username = f"{user_info.get('name', 'Unknown')}#{user_info.get('discriminator', '0000')}"
                 self.status_label.setText(f"✅ Token有效 - 用户名: {username}")
                 self.status_label.setStyleSheet("color: green;")
@@ -152,11 +165,17 @@ class AccountDialog(QDialog):
             is_valid, user_info, error_msg = await validator.validate_token(token)
 
             if is_valid and user_info and isinstance(user_info, dict):
+                self.current_user_info = user_info
+                self.current_is_valid = True
+                self.current_last_verified = time.time()
                 username = f"{user_info.get('name', 'Unknown')}#{user_info.get('discriminator', '0000')}"
                 bot_status = "🤖 机器人账号" if user_info.get('bot', False) else "👤 用户账号"
                 self.status_label.setText(f"✅ Token有效\n{bot_status}\n👤 用户名: {username}\n🔗 验证成功！")
                 self.status_label.setStyleSheet("color: green;")
             else:
+                self.current_user_info = None
+                self.current_is_valid = False
+                self.current_last_verified = time.time()
                 # 提供更友好的错误信息
                 if "401" in error_msg or "Unauthorized" in error_msg:
                     friendly_msg = "Token无效或已过期，请重新获取"
@@ -177,6 +196,9 @@ class AccountDialog(QDialog):
                 self.status_label.setStyleSheet("color: red;")
 
         except Exception as e:
+            self.current_user_info = None
+            self.current_is_valid = False
+            self.current_last_verified = None
             self.status_label.setText(f"❌ 验证出错: {str(e)}")
             self.status_label.setStyleSheet("color: red;")
         finally:
@@ -260,20 +282,12 @@ class AccountDialog(QDialog):
 
     def get_account_data(self):
         """获取账号数据"""
-        # 解析验证状态
-        is_valid = "✅" in self.status_label.text()
-        # 注意：这里我们不能轻易从label文本重建user_info，
-        # 实际使用时会重新验证或保留原有info
-        user_info = self.account.user_info if self.account else None
-
-        # 如果刚才验证成功了，但是self.account.user_info可能没更新（因为validate只跑了一次逻辑）
-        # 在这里我们简化处理：如果需要最新user_info，依赖外部重新验证
-
         return {
             'token': self.token_input.text().strip(),
             'is_active': self.active_checkbox.isChecked(),
-            'is_valid': is_valid,
-            'user_info': user_info
+            'is_valid': self.current_is_valid,
+            'user_info': self.current_user_info,
+            'last_verified': self.current_last_verified,
         }
 
 
@@ -287,18 +301,53 @@ class RuleDialog(QDialog):
     def init_ui(self):
         self.setWindowTitle("添加规则" if not self.rule else "编辑规则")
         self.setModal(True)
-        self.resize(500, 350)
+        self.resize(560, 460)
 
         layout = QVBoxLayout(self)
 
-        # 关键词输入
-        keywords_layout = QHBoxLayout()
-        keywords_layout.addWidget(QLabel("关键词:"))
-        self.keywords_input = QLineEdit()
-        self.keywords_input.setPlaceholderText("用逗号分隔（支持中文逗号）多个关键词")
+        # 关键词输入与排序
+        keywords_layout = QVBoxLayout()
+        keywords_header = QHBoxLayout()
+        keywords_header.addWidget(QLabel("关键词:"))
+        keywords_header.addStretch()
+        keywords_hint = QLabel("可拖动调整顺序，双击可直接编辑")
+        keywords_hint.setStyleSheet("color: gray;")
+        keywords_header.addWidget(keywords_hint)
+        keywords_layout.addLayout(keywords_header)
+
+        keyword_input_layout = QHBoxLayout()
+        self.keyword_input = QLineEdit()
+        self.keyword_input.setPlaceholderText("输入关键词后回车或点添加，支持逗号/换行批量粘贴")
+        self.keyword_input.returnPressed.connect(self.add_keywords_from_input)
+        keyword_input_layout.addWidget(self.keyword_input)
+
+        add_keyword_btn = QPushButton("添加")
+        add_keyword_btn.clicked.connect(self.add_keywords_from_input)
+        keyword_input_layout.addWidget(add_keyword_btn)
+        keywords_layout.addLayout(keyword_input_layout)
+
+        self.keywords_list = QListWidget()
+        self.keywords_list.setAlternatingRowColors(True)
+        self.keywords_list.setMinimumHeight(120)
+        self.keywords_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.keywords_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.keywords_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.keywords_list.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked |
+            QAbstractItemView.EditTrigger.EditKeyPressed
+        )
+        keywords_layout.addWidget(self.keywords_list)
+
+        keyword_actions_layout = QHBoxLayout()
+        keyword_actions_layout.addStretch()
+        remove_keyword_btn = QPushButton("删除选中")
+        remove_keyword_btn.clicked.connect(self.remove_selected_keyword)
+        keyword_actions_layout.addWidget(remove_keyword_btn)
+        keywords_layout.addLayout(keyword_actions_layout)
+
         if self.rule:
-            self.keywords_input.setText(", ".join(self.rule.keywords))
-        keywords_layout.addWidget(self.keywords_input)
+            self.add_keywords(self.rule.keywords)
+
         layout.addLayout(keywords_layout)
 
         # 回复内容
@@ -408,6 +457,43 @@ class RuleDialog(QDialog):
 
         layout.addLayout(buttons_layout)
 
+    def add_keywords(self, keywords: List[str]):
+        for keyword in keywords:
+            cleaned_keyword = keyword.strip()
+            if not cleaned_keyword:
+                continue
+
+            item = QListWidgetItem(cleaned_keyword)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable | Qt.ItemFlag.ItemIsDragEnabled)
+            self.keywords_list.addItem(item)
+
+    def add_keywords_from_input(self):
+        keywords = split_keywords(self.keyword_input.text())
+        if not keywords:
+            return
+
+        self.add_keywords(keywords)
+        self.keyword_input.clear()
+        self.keywords_list.setCurrentRow(self.keywords_list.count() - 1)
+
+    def remove_selected_keyword(self):
+        current_row = self.keywords_list.currentRow()
+        if current_row >= 0:
+            self.keywords_list.takeItem(current_row)
+
+    def get_keywords(self) -> List[str]:
+        keywords = []
+        for index in range(self.keywords_list.count()):
+            keyword = self.keywords_list.item(index).text().strip()
+            if keyword:
+                keywords.append(keyword)
+
+        pending_keywords = split_keywords(self.keyword_input.text())
+        if pending_keywords:
+            keywords.extend(pending_keywords)
+
+        return keywords
+
     def get_rule_data(self):
         """获取规则数据"""
         match_type_map = {
@@ -425,11 +511,8 @@ class RuleDialog(QDialog):
             except ValueError:
                 pass  # 忽略无效的频道ID
 
-        def split_keywords(text: str) -> List[str]:
-            return [k.strip() for k in re.split(r"[,\n，;；]+", text) if k.strip()]
-
         return {
-            'keywords': split_keywords(self.keywords_input.text()),
+            'keywords': self.get_keywords(),
             'reply': self.reply_input.toPlainText().strip(),
             'match_type': match_type_map[self.match_type_combo.currentIndex()],
             'target_channels': target_channels,
@@ -441,6 +524,106 @@ class RuleDialog(QDialog):
             'case_sensitive': self.case_sensitive_checkbox.isChecked(),
             'exclude_keywords': split_keywords(self.exclude_keywords_input.text()),
         }
+
+
+class ReorderableRulesTable(QTableWidget):
+    """支持整行拖拽排序的规则表格"""
+    row_reordered = Signal(int, int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropOverwriteMode(False)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def dropEvent(self, event):
+        if event.source() is not self:
+            super().dropEvent(event)
+            return
+
+        selected_rows = self.selectionModel().selectedRows()
+        if len(selected_rows) != 1:
+            event.ignore()
+            return
+
+        source_row = selected_rows[0].row()
+        target_row = self._target_row_from_event(event)
+        if target_row < 0:
+            event.ignore()
+            return
+
+        if source_row < target_row:
+            target_row -= 1
+
+        if source_row == target_row:
+            event.accept()
+            return
+
+        self.row_reordered.emit(source_row, target_row)
+        event.accept()
+
+    def _target_row_from_event(self, event) -> int:
+        position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        index = self.indexAt(position)
+
+        if not index.isValid():
+            return self.rowCount()
+
+        indicator = self.dropIndicatorPosition()
+        if indicator == QAbstractItemView.DropIndicatorPosition.BelowItem:
+            return index.row() + 1
+        if indicator == QAbstractItemView.DropIndicatorPosition.OnViewport:
+            return self.rowCount()
+        return index.row()
+
+
+class RangeSelectableAccountsTable(QTableWidget):
+    """支持 Shift 单击连续选中的账号表格"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.anchor_row: Optional[int] = None
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
+    def mousePressEvent(self, event):
+        clicked_row = self._row_from_event(event)
+        is_shift_click = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+
+        if is_shift_click and clicked_row >= 0 and self.anchor_row is not None:
+            self.select_rows_by_indices(build_row_selection_range(self.anchor_row, clicked_row))
+            return
+
+        super().mousePressEvent(event)
+
+        if clicked_row >= 0:
+            self.anchor_row = clicked_row
+
+    def select_rows_by_indices(self, row_indices: List[int], clear_existing: bool = True):
+        if not row_indices:
+            return
+
+        if clear_existing:
+            self.clearSelection()
+
+        selection_model = self.selectionModel()
+        if selection_model is None:
+            return
+
+        flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+        for row_index in row_indices:
+            model_index = self.model().index(row_index, 0)
+            selection_model.select(model_index, flags)
+
+        self.setCurrentCell(row_indices[-1], 0)
+
+    def _row_from_event(self, event) -> int:
+        position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        index = self.indexAt(position)
+        return index.row() if index.isValid() else -1
 
 
 class WorkerThread(QThread):
@@ -663,6 +846,22 @@ class MainWindow(QMainWindow):
         header_layout = QHBoxLayout()
         header_layout.addWidget(QLabel("Discord 账号管理"))
 
+        header_layout.addWidget(QLabel("批量选择:"))
+        self.account_range_input = QLineEdit()
+        self.account_range_input.setPlaceholderText("例如 1-50, 80, 100-120")
+        self.account_range_input.setToolTip("按表格序号批量选择账号，序号从 1 开始")
+        self.account_range_input.returnPressed.connect(self.select_accounts_by_range)
+        self.account_range_input.setMaximumWidth(260)
+        header_layout.addWidget(self.account_range_input)
+
+        select_range_btn = QPushButton("选择区间")
+        select_range_btn.clicked.connect(self.select_accounts_by_range)
+        header_layout.addWidget(select_range_btn)
+
+        clear_selection_btn = QPushButton("清空选择")
+        clear_selection_btn.clicked.connect(self.clear_account_selection)
+        header_layout.addWidget(clear_selection_btn)
+
         header_layout.addStretch()
 
         revalidate_all_btn = QPushButton("重新验证所有")
@@ -676,13 +875,13 @@ class MainWindow(QMainWindow):
         layout.addLayout(header_layout)
 
         # 账号表格
-        self.accounts_table = QTableWidget()
+        self.accounts_table = RangeSelectableAccountsTable()
         self.accounts_table.setColumnCount(4)
         self.accounts_table.setHorizontalHeaderLabels(["用户名", "Token状态", "应用规则", "操作"])
         self.accounts_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.accounts_table.setAlternatingRowColors(True)
         self.accounts_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.accounts_table.setSelectionMode(QTableWidget.SelectionMode.MultiSelection)
+        self.accounts_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.accounts_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.accounts_table.customContextMenuRequested.connect(self.show_accounts_context_menu)
         layout.addWidget(self.accounts_table)
@@ -700,7 +899,7 @@ class MainWindow(QMainWindow):
 
         # 标题和添加按钮
         header_layout = QHBoxLayout()
-        header_layout.addWidget(QLabel("自动回复规则管理"))
+        header_layout.addWidget(QLabel("自动回复规则管理（可拖动整行调整优先级）"))
 
         # 搜索框
         self.rule_search_input = QLineEdit()
@@ -717,7 +916,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(header_layout)
 
         # 规则表格
-        self.rules_table = QTableWidget()
+        self.rules_table = ReorderableRulesTable()
         self.rules_table.setColumnCount(9)
         self.rules_table.setHorizontalHeaderLabels(["关键词", "回复内容", "匹配类型", "频道", "延迟", "忽略回复", "忽略@", "过滤关键词", "操作"])
         self.rules_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -726,6 +925,7 @@ class MainWindow(QMainWindow):
         self.rules_table.setSelectionMode(QTableWidget.SelectionMode.MultiSelection)
         self.rules_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.rules_table.customContextMenuRequested.connect(self.show_rules_context_menu)
+        self.rules_table.row_reordered.connect(self.move_rule_row)
         layout.addWidget(self.rules_table)
 
         # 统计信息
@@ -921,14 +1121,14 @@ class MainWindow(QMainWindow):
             self.accounts_table.setItem(row, 2, rules_item)
 
             # 操作按钮
-            edit_btn = QPushButton("编辑")
-            edit_btn.clicked.connect(lambda checked, alias=account.alias: self.edit_account_by_alias(alias))
+            replace_btn = QPushButton("替换")
+            replace_btn.clicked.connect(lambda checked, token=account.token: self.replace_account_by_token(token))
 
             rules_btn = QPushButton("规则")
             rules_btn.clicked.connect(lambda checked, token=account.token: self.edit_account_rules(token))
 
             validate_btn = QPushButton("验证")
-            validate_btn.clicked.connect(lambda checked, alias=account.alias: self.revalidate_account_by_alias(alias))
+            validate_btn.clicked.connect(lambda checked, token=account.token: self.revalidate_account_by_token(token))
 
             delete_btn = QPushButton("删除")
             delete_btn.clicked.connect(lambda checked, token=account.token: self.remove_account_by_token(token))
@@ -937,7 +1137,7 @@ class MainWindow(QMainWindow):
             button_widget = QWidget()
             button_layout = QHBoxLayout(button_widget)
             button_layout.setContentsMargins(2, 2, 2, 2)
-            button_layout.addWidget(edit_btn)
+            button_layout.addWidget(replace_btn)
             button_layout.addWidget(rules_btn)
             button_layout.addWidget(validate_btn)
             button_layout.addWidget(delete_btn)
@@ -1041,6 +1241,32 @@ class MainWindow(QMainWindow):
         # 应用当前搜索过滤
         self.filter_rules()
 
+    def move_rule_row(self, source_row: int, target_row: int):
+        """拖动规则整行后，更新底层规则顺序"""
+        if self.rule_search_input.text().strip():
+            QMessageBox.information(self, "提示", "请先清空搜索条件，再拖动规则排序")
+            self.update_rules_list()
+            return
+
+        total_rules = len(self.discord_manager.rules)
+        if not (0 <= source_row < total_rules and 0 <= target_row < total_rules):
+            return
+
+        self.discord_manager.rules = move_item_in_list(
+            self.discord_manager.rules,
+            source_row,
+            target_row,
+        )
+
+        self.update_rules_list()
+        self.save_config()
+        self.rules_table.selectRow(target_row)
+        target_item = self.rules_table.item(target_row, 0)
+        if target_item:
+            self.rules_table.scrollToItem(target_item, QAbstractItemView.ScrollHint.PositionAtCenter)
+
+        self.add_log(f"规则顺序已更新：第 {source_row + 1} 行 -> 第 {target_row + 1} 行", "info")
+
     def filter_rules(self):
         """根据搜索关键词过滤规则显示"""
         search_text = self.rule_search_input.text().strip().lower()
@@ -1106,8 +1332,9 @@ class MainWindow(QMainWindow):
 
         if len(selected_rows) == 1:
             # 单个账号的菜单
-            current_row = list(selected_rows)[0]
-            edit_action = menu.addAction("编辑账号")
+            replace_action = menu.addAction("替换账号")
+            rules_action = menu.addAction("编辑规则")
+            validate_action = menu.addAction("重新验证")
             delete_action = menu.addAction("删除账号")
         elif len(selected_rows) > 1:
             # 多个账号的菜单
@@ -1120,11 +1347,21 @@ class MainWindow(QMainWindow):
 
         if len(selected_rows) == 1:
             current_row = list(selected_rows)[0]
-            if action == edit_action:
+            if action == replace_action:
                 token_item = self.accounts_table.item(current_row, 0)
                 if token_item:
                     token = token_item.data(Qt.ItemDataRole.UserRole)
-                    self.edit_account_by_alias(token)  # 使用alias方法，因为token作为alias存储
+                    self.replace_account_by_token(token)
+            elif action == rules_action:
+                token_item = self.accounts_table.item(current_row, 0)
+                if token_item:
+                    token = token_item.data(Qt.ItemDataRole.UserRole)
+                    self.edit_account_rules(token)
+            elif action == validate_action:
+                token_item = self.accounts_table.item(current_row, 0)
+                if token_item:
+                    token = token_item.data(Qt.ItemDataRole.UserRole)
+                    self.revalidate_account_by_token(token)
             elif action == delete_action:
                 token_item = self.accounts_table.item(current_row, 0)
                 if token_item:
@@ -1133,6 +1370,40 @@ class MainWindow(QMainWindow):
         elif len(selected_rows) > 1:
             if action == delete_multiple_action:
                 self.remove_multiple_accounts(list(selected_rows))
+
+    def clear_account_selection(self):
+        """清空账号表格选择"""
+        self.accounts_table.clearSelection()
+
+    def select_accounts_by_range(self):
+        """按序号区间批量选择账号"""
+        total_accounts = len(self.discord_manager.accounts)
+        if total_accounts == 0:
+            QMessageBox.information(self, "提示", "当前没有账号可供选择")
+            return
+
+        selection_text = self.account_range_input.text().strip()
+        if not selection_text:
+            QMessageBox.information(self, "提示", "请输入要选择的序号范围，例如 1-50, 80, 100-120")
+            return
+
+        try:
+            row_indices = parse_selection_ranges(selection_text, total_accounts)
+        except ValueError as exc:
+            QMessageBox.warning(self, "范围格式错误", str(exc))
+            return
+
+        if not row_indices:
+            QMessageBox.information(self, "提示", "没有匹配到可选择的账号序号")
+            return
+
+        self.accounts_table.select_rows_by_indices(row_indices)
+
+        first_item = self.accounts_table.item(row_indices[0], 0)
+        if first_item:
+            self.accounts_table.scrollToItem(first_item, QAbstractItemView.ScrollHint.PositionAtTop)
+
+        self.add_log(f"已按序号批量选择 {len(row_indices)} 个账号", "info")
 
     def show_rules_context_menu(self, position):
         """显示规则右键菜单"""
@@ -1212,36 +1483,62 @@ class MainWindow(QMainWindow):
                 self.add_log(error_msg, "error")
                 QMessageBox.critical(self, "错误", error_msg)
 
+    def replace_account_by_token(self, token: str):
+        """替换账号但保持原有顺序与规则绑定"""
+        account_index = next((index for index, acc in enumerate(self.discord_manager.accounts) if acc.token == token), -1)
+        if account_index < 0:
+            QMessageBox.warning(self, "错误", "账号不存在")
+            return
+
+        account = self.discord_manager.accounts[account_index]
+
+        dialog = AccountDialog(self, account, discord_manager=self.discord_manager)
+        dialog.setWindowTitle("替换账号")
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            data = dialog.get_account_data()
+            new_token = data['token']
+
+            if not new_token:
+                QMessageBox.warning(self, "错误", "Token不能为空")
+                return
+
+            if any(
+                acc.token == new_token and index != account_index
+                for index, acc in enumerate(self.discord_manager.accounts)
+            ):
+                QMessageBox.warning(self, "错误", "该Token已存在")
+                return
+
+            replacement_account = Account(
+                token=new_token,
+                is_active=data['is_active'],
+                is_valid=data.get('is_valid', False),
+                last_verified=data.get('last_verified'),
+                user_info=data.get('user_info'),
+                rule_ids=list(account.rule_ids),
+                last_sent_time=account.last_sent_time if new_token == account.token else None,
+                rate_limit_until=account.rate_limit_until if new_token == account.token else None,
+            )
+
+            self.discord_manager.accounts = replace_item_preserving_order(
+                self.discord_manager.accounts,
+                account_index,
+                replacement_account,
+            )
+
+            self.add_log(f"账号位置 {account_index + 1} 已替换，顺序保持不变", "success")
+            self.update_accounts_list()
+            self.save_config()
+            QMessageBox.information(self, "成功", f"账号已替换，并保留在第 {account_index + 1} 位")
+
     def edit_account_by_alias(self, alias):
-        """通过别名编辑账号"""
+        """兼容旧入口：通过别名替换账号"""
         account = next((acc for acc in self.discord_manager.accounts if acc.alias == alias), None)
         if not account:
             QMessageBox.warning(self, "错误", "账号不存在")
             return
 
-        dialog = AccountDialog(self, account, discord_manager=self.discord_manager)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            data = dialog.get_account_data()
-
-            if not data['token']:
-                QMessageBox.warning(self, "错误", "Token不能为空")
-                return
-
-            # 检查Token是否重复（排除当前账号）
-            if data['token'] != alias and any(acc.token == data['token'] for acc in self.discord_manager.accounts):
-                QMessageBox.warning(self, "错误", "该Token已存在")
-                return
-
-            # 更新账号信息
-            account.token = data['token']
-            account.is_active = data['is_active']
-            account.is_valid = data.get('is_valid', False)
-            account.user_info = data.get('user_info')
-
-            self.add_log(f"账号 '{account.alias}' 更新成功", "success")
-            self.update_accounts_list()
-            self.save_config()
-            QMessageBox.information(self, "成功", "账号编辑成功")
+        self.replace_account_by_token(account.token)
 
     def edit_account_rules(self, token: str):
         """编辑账号应用的规则"""
@@ -1312,9 +1609,9 @@ class MainWindow(QMainWindow):
             self.add_log(error_msg, "error")
             QMessageBox.critical(self, "验证错误", error_msg)
 
-    def revalidate_account_by_alias(self, alias):
+    def revalidate_account_by_token(self, token: str):
         """重新验证账号Token"""
-        account = next((acc for acc in self.discord_manager.accounts if acc.alias == alias), None)
+        account = next((acc for acc in self.discord_manager.accounts if acc.token == token), None)
         if account:
             self.add_log(f"正在重新验证账号 '{account.alias}' 的Token", "info")
         else:
@@ -1346,6 +1643,15 @@ class MainWindow(QMainWindow):
             error_msg = f"验证过程中出错: {str(e)}"
             self.add_log(error_msg, "error")
             QMessageBox.critical(self, "验证错误", error_msg)
+
+    def revalidate_account_by_alias(self, alias):
+        """兼容旧入口：通过别名重新验证账号"""
+        account = next((acc for acc in self.discord_manager.accounts if acc.alias == alias), None)
+        if not account:
+            self.add_log("账号不存在", "error")
+            return
+
+        self.revalidate_account_by_token(account.token)
 
     def remove_account_by_token(self, token):
         """通过token删除账号"""
