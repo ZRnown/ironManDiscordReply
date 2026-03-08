@@ -526,7 +526,52 @@ class RuleDialog(QDialog):
         }
 
 
-class ReorderableRulesTable(QTableWidget):
+class RangeSelectableRowsTable(QTableWidget):
+    """支持 Shift 单击连续选中的通用行表格"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.anchor_row: Optional[int] = None
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
+    def mousePressEvent(self, event):
+        clicked_row = self._row_from_event(event)
+        is_shift_click = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+
+        if is_shift_click and clicked_row >= 0 and self.anchor_row is not None:
+            self.select_rows_by_indices(build_row_selection_range(self.anchor_row, clicked_row))
+            return
+
+        super().mousePressEvent(event)
+
+        if clicked_row >= 0:
+            self.anchor_row = clicked_row
+
+    def select_rows_by_indices(self, row_indices: List[int], clear_existing: bool = True):
+        if not row_indices:
+            return
+
+        if clear_existing:
+            self.clearSelection()
+
+        selection_model = self.selectionModel()
+        if selection_model is None:
+            return
+
+        flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+        for row_index in row_indices:
+            model_index = self.model().index(row_index, 0)
+            selection_model.select(model_index, flags)
+
+        self.setCurrentCell(row_indices[-1], 0)
+
+    def _row_from_event(self, event) -> int:
+        position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        index = self.indexAt(position)
+        return index.row() if index.isValid() else -1
+
+
+class ReorderableRulesTable(RangeSelectableRowsTable):
     """支持整行拖拽排序的规则表格"""
     row_reordered = Signal(int, int)
 
@@ -579,51 +624,6 @@ class ReorderableRulesTable(QTableWidget):
         if indicator == QAbstractItemView.DropIndicatorPosition.OnViewport:
             return self.rowCount()
         return index.row()
-
-
-class RangeSelectableAccountsTable(QTableWidget):
-    """支持 Shift 单击连续选中的账号表格"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.anchor_row: Optional[int] = None
-        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-
-    def mousePressEvent(self, event):
-        clicked_row = self._row_from_event(event)
-        is_shift_click = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-
-        if is_shift_click and clicked_row >= 0 and self.anchor_row is not None:
-            self.select_rows_by_indices(build_row_selection_range(self.anchor_row, clicked_row))
-            return
-
-        super().mousePressEvent(event)
-
-        if clicked_row >= 0:
-            self.anchor_row = clicked_row
-
-    def select_rows_by_indices(self, row_indices: List[int], clear_existing: bool = True):
-        if not row_indices:
-            return
-
-        if clear_existing:
-            self.clearSelection()
-
-        selection_model = self.selectionModel()
-        if selection_model is None:
-            return
-
-        flags = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
-        for row_index in row_indices:
-            model_index = self.model().index(row_index, 0)
-            selection_model.select(model_index, flags)
-
-        self.setCurrentCell(row_indices[-1], 0)
-
-    def _row_from_event(self, event) -> int:
-        position = event.position().toPoint() if hasattr(event, "position") else event.pos()
-        index = self.indexAt(position)
-        return index.row() if index.isValid() else -1
 
 
 class WorkerThread(QThread):
@@ -875,7 +875,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(header_layout)
 
         # 账号表格
-        self.accounts_table = RangeSelectableAccountsTable()
+        self.accounts_table = RangeSelectableRowsTable()
         self.accounts_table.setColumnCount(4)
         self.accounts_table.setHorizontalHeaderLabels(["用户名", "Token状态", "应用规则", "操作"])
         self.accounts_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -922,7 +922,7 @@ class MainWindow(QMainWindow):
         self.rules_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.rules_table.setAlternatingRowColors(True)
         self.rules_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.rules_table.setSelectionMode(QTableWidget.SelectionMode.MultiSelection)
+        self.rules_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.rules_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.rules_table.customContextMenuRequested.connect(self.show_rules_context_menu)
         self.rules_table.row_reordered.connect(self.move_rule_row)
