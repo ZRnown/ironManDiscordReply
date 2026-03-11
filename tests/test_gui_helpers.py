@@ -1,7 +1,9 @@
 import unittest
 
 from src.gui_helpers import (
+    apply_checked_indices,
     build_row_selection_range,
+    ensure_flag_bits,
     move_item_in_list,
     parse_selection_ranges,
     replace_item_preserving_order,
@@ -51,6 +53,28 @@ class BuildRowSelectionRangeTests(unittest.TestCase):
 
     def test_builds_inclusive_range_when_target_is_above_anchor(self):
         self.assertEqual(build_row_selection_range(5, 2), [2, 3, 4, 5])
+
+
+class ApplyCheckedIndicesTests(unittest.TestCase):
+    def test_checks_requested_indices_without_touching_others(self):
+        self.assertEqual(
+            apply_checked_indices([False, False, True, False], [0, 1], checked=True),
+            [True, True, True, False],
+        )
+
+    def test_unchecks_requested_indices(self):
+        self.assertEqual(
+            apply_checked_indices([True, True, True, False], [1, 2], checked=False),
+            [True, False, False, False],
+        )
+
+
+class EnsureFlagBitsTests(unittest.TestCase):
+    def test_adds_missing_bits_without_losing_existing_bits(self):
+        self.assertEqual(
+            ensure_flag_bits(0b001, 0b010, 0b100),
+            0b111,
+        )
 
 
 class MoveItemInListTests(unittest.TestCase):

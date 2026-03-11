@@ -61,6 +61,23 @@ def build_row_selection_range(anchor_row: int, target_row: int) -> List[int]:
     return list(range(start_row, end_row + 1))
 
 
+def apply_checked_indices(checked_states: Sequence[bool], indices: Sequence[int], checked: bool = True) -> List[bool]:
+    updated_states = list(checked_states)
+
+    for index in indices:
+        if 0 <= index < len(updated_states):
+            updated_states[index] = checked
+
+    return updated_states
+
+
+def ensure_flag_bits(base_flags: int, *required_bits: int) -> int:
+    merged_flags = base_flags
+    for bit in required_bits:
+        merged_flags |= bit
+    return merged_flags
+
+
 def replace_item_preserving_order(items: Sequence[T], index: int, new_item: T) -> List[T]:
     copied_items = list(items)
     copied_items[index] = new_item

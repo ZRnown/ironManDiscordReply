@@ -20,7 +20,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from discord_client import DiscordManager, Account, Rule, MatchType
 from config_manager import ConfigManager
 from gui_helpers import (
+    apply_checked_indices,
     build_row_selection_range,
+    ensure_flag_bits,
     move_item_in_list,
     parse_selection_ranges,
     replace_item_preserving_order,
@@ -291,6 +293,64 @@ class AccountDialog(QDialog):
         }
 
 
+class ReorderableKeywordList(QListWidget):
+    """支持稳定拖拽排序的关键词列表"""
+    row_reordered = Signal(int, int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAlternatingRowColors(True)
+        self.setMinimumHeight(120)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropOverwriteMode(False)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def dropEvent(self, event):
+        if event.source() is not self:
+            super().dropEvent(event)
+            return
+
+        selected_items = self.selectedItems()
+        if len(selected_items) != 1:
+            event.ignore()
+            return
+
+        source_row = self.row(selected_items[0])
+        target_row = self._target_row_from_event(event)
+        if target_row < 0:
+            event.ignore()
+            return
+
+        if source_row < target_row:
+            target_row -= 1
+
+        if source_row == target_row:
+            event.accept()
+            return
+
+        self.row_reordered.emit(source_row, target_row)
+        event.accept()
+
+    def _target_row_from_event(self, event) -> int:
+        position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        index = self.indexAt(position)
+
+        if not index.isValid():
+            return self.count()
+
+        indicator = self.dropIndicatorPosition()
+        if indicator == QAbstractItemView.DropIndicatorPosition.BelowItem:
+            return index.row() + 1
+        if indicator == QAbstractItemView.DropIndicatorPosition.OnViewport:
+            return self.count()
+        return index.row()
+
+
 class RuleDialog(QDialog):
     """规则添加/编辑对话框"""
     def __init__(self, parent=None, rule=None):
@@ -326,12 +386,8 @@ class RuleDialog(QDialog):
         keyword_input_layout.addWidget(add_keyword_btn)
         keywords_layout.addLayout(keyword_input_layout)
 
-        self.keywords_list = QListWidget()
-        self.keywords_list.setAlternatingRowColors(True)
-        self.keywords_list.setMinimumHeight(120)
-        self.keywords_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self.keywords_list.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.keywords_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.keywords_list = ReorderableKeywordList()
+        self.keywords_list.row_reordered.connect(self.move_keyword_row)
         self.keywords_list.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked |
             QAbstractItemView.EditTrigger.EditKeyPressed
@@ -463,9 +519,18 @@ class RuleDialog(QDialog):
             if not cleaned_keyword:
                 continue
 
-            item = QListWidgetItem(cleaned_keyword)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable | Qt.ItemFlag.ItemIsDragEnabled)
-            self.keywords_list.addItem(item)
+            self.add_keyword_item(cleaned_keyword)
+
+    def add_keyword_item(self, keyword: str):
+        item = QListWidgetItem(keyword)
+        item_flags = ensure_flag_bits(
+            int(item.flags()),
+            int(Qt.ItemFlag.ItemIsEditable),
+            int(Qt.ItemFlag.ItemIsDragEnabled),
+            int(Qt.ItemFlag.ItemIsDropEnabled),
+        )
+        item.setFlags(Qt.ItemFlags(item_flags))
+        self.keywords_list.addItem(item)
 
     def add_keywords_from_input(self):
         keywords = split_keywords(self.keyword_input.text())
@@ -480,6 +545,13 @@ class RuleDialog(QDialog):
         current_row = self.keywords_list.currentRow()
         if current_row >= 0:
             self.keywords_list.takeItem(current_row)
+
+    def move_keyword_row(self, source_row: int, target_row: int):
+        keyword_texts = [self.keywords_list.item(index).text() for index in range(self.keywords_list.count())]
+        moved_keywords = move_item_in_list(keyword_texts, source_row, target_row)
+        self.keywords_list.clear()
+        self.add_keywords(moved_keywords)
+        self.keywords_list.setCurrentRow(target_row)
 
     def get_keywords(self) -> List[str]:
         keywords = []
@@ -569,6 +641,197 @@ class RangeSelectableRowsTable(QTableWidget):
         position = event.position().toPoint() if hasattr(event, "position") else event.pos()
         index = self.indexAt(position)
         return index.row() if index.isValid() else -1
+
+
+class AccountEditDialog(QDialog):
+    """账号编辑对话框：支持 token 替换与规则范围勾选"""
+
+    on_token_changed = AccountDialog.on_token_changed
+    update_validation_status = AccountDialog.update_validation_status
+    validate_token_async = AccountDialog.validate_token_async
+    validate_token = AccountDialog.validate_token
+    show_token_help = AccountDialog.show_token_help
+    accept_and_validate = AccountDialog.accept_and_validate
+
+    def __init__(self, parent=None, account=None, rules=None):
+        super().__init__(parent)
+        self.account = account
+        self.rules = rules or []
+        self.checkboxes = []
+        self.is_validating = False
+        self.current_user_info = account.user_info if account else None
+        self.current_is_valid = account.is_valid if account else False
+        self.current_last_verified = account.last_verified if account else None
+        self.init_ui()
+
+    def init_ui(self):
+        self.setWindowTitle(f"编辑账号 - {self.account.alias}")
+        self.setModal(True)
+        self.resize(620, 620)
+
+        layout = QVBoxLayout(self)
+
+        token_layout = QHBoxLayout()
+        token_layout.addWidget(QLabel("Discord Token:"))
+        self.token_input = QLineEdit()
+        self.token_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.token_input.setPlaceholderText("输入新的 Discord Token")
+        self.token_input.setText(self.account.token)
+        self.token_input.textChanged.connect(self.on_token_changed)
+        token_layout.addWidget(self.token_input)
+
+        self.validate_btn = QPushButton("验证Token")
+        self.validate_btn.clicked.connect(self.validate_token)
+        token_layout.addWidget(self.validate_btn)
+
+        help_btn = QPushButton("❓")
+        help_btn.setMaximumWidth(30)
+        help_btn.setToolTip("如何获取Discord Token")
+        help_btn.clicked.connect(self.show_token_help)
+        token_layout.addWidget(help_btn)
+        layout.addLayout(token_layout)
+
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: gray; font-style: italic;")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        self.active_checkbox = QCheckBox("启用账号")
+        self.active_checkbox.setChecked(self.account.is_active)
+        layout.addWidget(self.active_checkbox)
+
+        rules_title = QLabel(f"配置账号 '{self.account.alias}' 使用的规则：")
+        rules_title.setStyleSheet("font-weight: bold; font-size: 12px;")
+        layout.addWidget(rules_title)
+
+        range_layout = QHBoxLayout()
+        range_layout.addWidget(QLabel("按序号勾选:"))
+        self.rule_range_input = QLineEdit()
+        self.rule_range_input.setPlaceholderText("例如 1-20, 35, 40-45")
+        self.rule_range_input.returnPressed.connect(self.select_rule_range)
+        range_layout.addWidget(self.rule_range_input)
+
+        select_range_btn = QPushButton("勾选区间")
+        select_range_btn.clicked.connect(self.select_rule_range)
+        range_layout.addWidget(select_range_btn)
+
+        clear_range_btn = QPushButton("取消区间")
+        clear_range_btn.clicked.connect(self.clear_rule_range)
+        range_layout.addWidget(clear_range_btn)
+        layout.addLayout(range_layout)
+
+        scroll_area = QScrollArea()
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+
+        self.checkboxes = []
+        for index, rule in enumerate(self.rules, start=1):
+            keyword_preview = rule.keywords[0] if rule.keywords else "无关键词"
+            reply_preview = rule.reply[:30] + ("..." if len(rule.reply) > 30 else "")
+            checkbox = QCheckBox(f"{index}. {keyword_preview} -> {reply_preview}")
+            checkbox.setChecked(rule.id in self.account.rule_ids)
+            checkbox.setToolTip(
+                f"序号: {index}\n关键词: {', '.join(rule.keywords)}\n回复: {rule.reply}"
+            )
+            self.checkboxes.append((rule.id, checkbox))
+            scroll_layout.addWidget(checkbox)
+
+        if not self.rules:
+            no_rules_label = QLabel("暂无可用规则，请先添加规则")
+            no_rules_label.setStyleSheet("color: gray; font-style: italic;")
+            scroll_layout.addWidget(no_rules_label)
+
+        scroll_layout.addStretch()
+        scroll_area.setWidget(scroll_widget)
+        scroll_area.setWidgetResizable(True)
+        layout.addWidget(scroll_area)
+
+        self.stats_label = QLabel()
+        self.update_stats_label()
+        layout.addWidget(self.stats_label)
+
+        for _, checkbox in self.checkboxes:
+            checkbox.stateChanged.connect(lambda _state, dialog=self: dialog.update_stats_label())
+
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
+
+        select_all_btn = QPushButton("全选")
+        select_all_btn.clicked.connect(self.select_all_rules)
+        buttons_layout.addWidget(select_all_btn)
+
+        clear_all_btn = QPushButton("清空")
+        clear_all_btn.clicked.connect(self.clear_all_rules)
+        buttons_layout.addWidget(clear_all_btn)
+
+        buttons_layout.addStretch()
+
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        buttons_layout.addWidget(cancel_btn)
+
+        self.ok_btn = QPushButton("确定")
+        self.ok_btn.clicked.connect(self.accept_and_validate)
+        self.ok_btn.setDefault(True)
+        buttons_layout.addWidget(self.ok_btn)
+        layout.addLayout(buttons_layout)
+
+        self.update_validation_status()
+
+    def update_stats_label(self):
+        selected_count = sum(1 for _, checkbox in self.checkboxes if checkbox.isChecked())
+        total_count = len(self.checkboxes)
+        self.stats_label.setText(f"已选择 {selected_count}/{total_count} 个规则")
+
+    def select_all_rules(self):
+        for _, checkbox in self.checkboxes:
+            checkbox.setChecked(True)
+
+    def clear_all_rules(self):
+        for _, checkbox in self.checkboxes:
+            checkbox.setChecked(False)
+
+    def select_rule_range(self):
+        self.apply_rule_range(checked=True)
+
+    def clear_rule_range(self):
+        self.apply_rule_range(checked=False)
+
+    def apply_rule_range(self, checked: bool):
+        if not self.checkboxes:
+            QMessageBox.information(self, "提示", "当前没有规则可供选择")
+            return
+
+        selection_text = self.rule_range_input.text().strip()
+        if not selection_text:
+            QMessageBox.information(self, "提示", "请输入规则序号范围，例如 1-20, 35, 40-45")
+            return
+
+        try:
+            row_indices = parse_selection_ranges(selection_text, len(self.checkboxes))
+        except ValueError as exc:
+            QMessageBox.warning(self, "范围格式错误", str(exc))
+            return
+
+        current_states = [checkbox.isChecked() for _, checkbox in self.checkboxes]
+        updated_states = apply_checked_indices(current_states, row_indices, checked=checked)
+        for state, (_, checkbox) in zip(updated_states, self.checkboxes):
+            checkbox.setChecked(state)
+
+        self.update_stats_label()
+
+    def get_selected_rule_ids(self):
+        return [rule_id for rule_id, checkbox in self.checkboxes if checkbox.isChecked()]
+
+    def get_account_data(self):
+        return {
+            'token': self.token_input.text().strip(),
+            'is_active': self.active_checkbox.isChecked(),
+            'is_valid': self.current_is_valid,
+            'user_info': self.current_user_info,
+            'last_verified': self.current_last_verified,
+            'selected_rule_ids': self.get_selected_rule_ids(),
+        }
 
 
 class ReorderableRulesTable(RangeSelectableRowsTable):
@@ -1121,11 +1384,8 @@ class MainWindow(QMainWindow):
             self.accounts_table.setItem(row, 2, rules_item)
 
             # 操作按钮
-            replace_btn = QPushButton("替换")
-            replace_btn.clicked.connect(lambda checked, token=account.token: self.replace_account_by_token(token))
-
-            rules_btn = QPushButton("规则")
-            rules_btn.clicked.connect(lambda checked, token=account.token: self.edit_account_rules(token))
+            edit_btn = QPushButton("编辑")
+            edit_btn.clicked.connect(lambda checked, token=account.token: self.edit_account_by_token(token))
 
             validate_btn = QPushButton("验证")
             validate_btn.clicked.connect(lambda checked, token=account.token: self.revalidate_account_by_token(token))
@@ -1137,8 +1397,7 @@ class MainWindow(QMainWindow):
             button_widget = QWidget()
             button_layout = QHBoxLayout(button_widget)
             button_layout.setContentsMargins(2, 2, 2, 2)
-            button_layout.addWidget(replace_btn)
-            button_layout.addWidget(rules_btn)
+            button_layout.addWidget(edit_btn)
             button_layout.addWidget(validate_btn)
             button_layout.addWidget(delete_btn)
 
@@ -1332,8 +1591,7 @@ class MainWindow(QMainWindow):
 
         if len(selected_rows) == 1:
             # 单个账号的菜单
-            replace_action = menu.addAction("替换账号")
-            rules_action = menu.addAction("编辑规则")
+            edit_action = menu.addAction("编辑账号")
             validate_action = menu.addAction("重新验证")
             delete_action = menu.addAction("删除账号")
         elif len(selected_rows) > 1:
@@ -1347,16 +1605,11 @@ class MainWindow(QMainWindow):
 
         if len(selected_rows) == 1:
             current_row = list(selected_rows)[0]
-            if action == replace_action:
+            if action == edit_action:
                 token_item = self.accounts_table.item(current_row, 0)
                 if token_item:
                     token = token_item.data(Qt.ItemDataRole.UserRole)
-                    self.replace_account_by_token(token)
-            elif action == rules_action:
-                token_item = self.accounts_table.item(current_row, 0)
-                if token_item:
-                    token = token_item.data(Qt.ItemDataRole.UserRole)
-                    self.edit_account_rules(token)
+                    self.edit_account_by_token(token)
             elif action == validate_action:
                 token_item = self.accounts_table.item(current_row, 0)
                 if token_item:
@@ -1483,8 +1736,8 @@ class MainWindow(QMainWindow):
                 self.add_log(error_msg, "error")
                 QMessageBox.critical(self, "错误", error_msg)
 
-    def replace_account_by_token(self, token: str):
-        """替换账号但保持原有顺序与规则绑定"""
+    def edit_account_by_token(self, token: str):
+        """编辑账号：支持替换 token 与配置规则"""
         account_index = next((index for index, acc in enumerate(self.discord_manager.accounts) if acc.token == token), -1)
         if account_index < 0:
             QMessageBox.warning(self, "错误", "账号不存在")
@@ -1492,8 +1745,7 @@ class MainWindow(QMainWindow):
 
         account = self.discord_manager.accounts[account_index]
 
-        dialog = AccountDialog(self, account, discord_manager=self.discord_manager)
-        dialog.setWindowTitle("替换账号")
+        dialog = AccountEditDialog(self, account, self.discord_manager.rules)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             data = dialog.get_account_data()
             new_token = data['token']
@@ -1515,7 +1767,7 @@ class MainWindow(QMainWindow):
                 is_valid=data.get('is_valid', False),
                 last_verified=data.get('last_verified'),
                 user_info=data.get('user_info'),
-                rule_ids=list(account.rule_ids),
+                rule_ids=data.get('selected_rule_ids', list(account.rule_ids)),
                 last_sent_time=account.last_sent_time if new_token == account.token else None,
                 rate_limit_until=account.rate_limit_until if new_token == account.token else None,
             )
@@ -1526,35 +1778,27 @@ class MainWindow(QMainWindow):
                 replacement_account,
             )
 
-            self.add_log(f"账号位置 {account_index + 1} 已替换，顺序保持不变", "success")
+            self.add_log(f"账号位置 {account_index + 1} 编辑成功，顺序保持不变", "success")
             self.update_accounts_list()
             self.save_config()
-            QMessageBox.information(self, "成功", f"账号已替换，并保留在第 {account_index + 1} 位")
+            QMessageBox.information(self, "成功", f"账号已更新，并保留在第 {account_index + 1} 位")
+
+    def replace_account_by_token(self, token: str):
+        """兼容旧入口：替换账号"""
+        self.edit_account_by_token(token)
 
     def edit_account_by_alias(self, alias):
-        """兼容旧入口：通过别名替换账号"""
+        """兼容旧入口：通过别名编辑账号"""
         account = next((acc for acc in self.discord_manager.accounts if acc.alias == alias), None)
         if not account:
             QMessageBox.warning(self, "错误", "账号不存在")
             return
 
-        self.replace_account_by_token(account.token)
+        self.edit_account_by_token(account.token)
 
     def edit_account_rules(self, token: str):
-        """编辑账号应用的规则"""
-        account = next((acc for acc in self.discord_manager.accounts if acc.token == token), None)
-        if not account:
-            QMessageBox.warning(self, "错误", "账号不存在")
-            return
-
-        dialog = AccountRulesDialog(self, account, self.discord_manager.rules)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            selected_rule_ids = dialog.get_selected_rule_ids()
-            account.rule_ids = selected_rule_ids
-            self.add_log(f"账号 '{account.alias}' 规则配置更新成功", "success")
-            self.update_accounts_list()
-            self.save_config()
-            QMessageBox.information(self, "成功", "规则配置更新成功")
+        """兼容旧入口：编辑账号应用的规则"""
+        self.edit_account_by_token(token)
 
     def revalidate_all_accounts(self):
         """重新验证所有账号"""
@@ -1982,107 +2226,6 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "成功", "配置导入成功")
             else:
                 QMessageBox.warning(self, "错误", "配置导入失败")
-
-
-class AccountRulesDialog(QDialog):
-    """账号规则配置对话框"""
-
-    def __init__(self, parent=None, account=None, rules=None):
-        super().__init__(parent)
-        self.account = account
-        self.rules = rules or []
-        self.checkboxes = []
-        self.init_ui()
-
-    def init_ui(self):
-        """初始化界面"""
-        self.setWindowTitle(f"配置账号规则 - {self.account.alias}")
-        self.setModal(True)
-        self.resize(500, 400)
-
-        layout = QVBoxLayout(self)
-
-        # 标题
-        title_label = QLabel(f"选择账号 '{self.account.alias}' 要应用的规则：")
-        title_label.setStyleSheet("font-weight: bold; font-size: 12px;")
-        layout.addWidget(title_label)
-
-        # 规则选择区域
-        scroll_area = QScrollArea()
-        scroll_widget = QWidget()
-        scroll_layout = QVBoxLayout(scroll_widget)
-
-        self.checkboxes = []
-        for rule in self.rules:
-            checkbox = QCheckBox(f"[{rule.id}] {rule.keywords[0] if rule.keywords else '无关键词'} -> {rule.reply[:30]}{'...' if len(rule.reply) > 30 else ''}")
-            checkbox.setChecked(rule.id in self.account.rule_ids)
-            checkbox.setToolTip(f"关键词: {', '.join(rule.keywords)}\n回复: {rule.reply}")
-            self.checkboxes.append((rule.id, checkbox))
-            scroll_layout.addWidget(checkbox)
-
-        if not self.rules:
-            no_rules_label = QLabel("暂无可用规则，请先添加规则")
-            no_rules_label.setStyleSheet("color: gray; font-style: italic;")
-            scroll_layout.addWidget(no_rules_label)
-
-        scroll_layout.addStretch()
-        scroll_area.setWidget(scroll_widget)
-        scroll_area.setWidgetResizable(True)
-        layout.addWidget(scroll_area)
-
-        # 统计信息
-        stats_label = QLabel()
-        self.update_stats_label(stats_label)
-        layout.addWidget(stats_label)
-
-        # 连接信号
-        for rule_id, checkbox in self.checkboxes:
-            checkbox.stateChanged.connect(lambda: self.update_stats_label(stats_label))
-
-        # 按钮
-        buttons_layout = QHBoxLayout()
-        buttons_layout.addStretch()
-
-        select_all_btn = QPushButton("全选")
-        select_all_btn.clicked.connect(self.select_all_rules)
-        buttons_layout.addWidget(select_all_btn)
-
-        clear_all_btn = QPushButton("清空")
-        clear_all_btn.clicked.connect(self.clear_all_rules)
-        buttons_layout.addWidget(clear_all_btn)
-
-        buttons_layout.addStretch()
-
-        cancel_btn = QPushButton("取消")
-        cancel_btn.clicked.connect(self.reject)
-        buttons_layout.addWidget(cancel_btn)
-
-        ok_btn = QPushButton("确定")
-        ok_btn.clicked.connect(self.accept)
-        ok_btn.setDefault(True)
-        buttons_layout.addWidget(ok_btn)
-
-        layout.addLayout(buttons_layout)
-
-    def update_stats_label(self, label):
-        """更新统计标签"""
-        selected_count = sum(1 for _, checkbox in self.checkboxes if checkbox.isChecked())
-        total_count = len(self.checkboxes)
-        label.setText(f"已选择 {selected_count}/{total_count} 个规则")
-
-    def select_all_rules(self):
-        """选择所有规则"""
-        for _, checkbox in self.checkboxes:
-            checkbox.setChecked(True)
-
-    def clear_all_rules(self):
-        """清空所有选择"""
-        for _, checkbox in self.checkboxes:
-            checkbox.setChecked(False)
-
-    def get_selected_rule_ids(self):
-        """获取选中的规则ID列表"""
-        return [rule_id for rule_id, checkbox in self.checkboxes if checkbox.isChecked()]
 
 
 def main():
