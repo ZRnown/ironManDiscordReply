@@ -78,6 +78,50 @@ def ensure_flag_bits(base_flags: int, *required_bits: int) -> int:
     return merged_flags
 
 
+def can_move_adjacent_row(current_index: int, item_count: int, step: int) -> bool:
+    if item_count <= 0:
+        return False
+    if not 0 <= current_index < item_count:
+        return False
+    if step == 0:
+        return False
+
+    target_index = current_index + step
+    return 0 <= target_index < item_count
+
+
+def get_adjacent_row_index(current_index: int, item_count: int, step: int) -> int:
+    if item_count <= 0:
+        raise ValueError("item_count must be positive")
+    if not 0 <= current_index < item_count:
+        raise IndexError("current_index out of range")
+    if step == 0:
+        return current_index
+
+    target_index = current_index + step
+    if target_index < 0:
+        return 0
+    if target_index >= item_count:
+        return item_count - 1
+    return target_index
+
+
+def normalize_reorder_target_row(source_index: int, target_index: int, item_count: int) -> int:
+    if item_count <= 0:
+        raise ValueError("item_count must be positive")
+    if not 0 <= source_index < item_count:
+        raise IndexError("source_index out of range")
+    if not 0 <= target_index <= item_count:
+        raise IndexError("target_index out of range")
+
+    normalized_target = target_index
+    if source_index < normalized_target:
+        normalized_target -= 1
+    if normalized_target >= item_count:
+        normalized_target = item_count - 1
+    return normalized_target
+
+
 def replace_item_preserving_order(items: Sequence[T], index: int, new_item: T) -> List[T]:
     copied_items = list(items)
     copied_items[index] = new_item

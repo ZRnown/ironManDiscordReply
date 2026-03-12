@@ -22,8 +22,11 @@ from config_manager import ConfigManager
 from gui_helpers import (
     apply_checked_indices,
     build_row_selection_range,
+    can_move_adjacent_row,
     ensure_flag_bits,
+    get_adjacent_row_index,
     move_item_in_list,
+    normalize_reorder_target_row,
     parse_selection_ranges,
     replace_item_preserving_order,
     split_keywords,
@@ -326,8 +329,7 @@ class ReorderableKeywordList(QListWidget):
             event.ignore()
             return
 
-        if source_row < target_row:
-            target_row -= 1
+        target_row = normalize_reorder_target_row(source_row, target_row, self.count())
 
         if source_row == target_row:
             event.accept()
@@ -370,7 +372,7 @@ class RuleDialog(QDialog):
         keywords_header = QHBoxLayout()
         keywords_header.addWidget(QLabel("关键词:"))
         keywords_header.addStretch()
-        keywords_hint = QLabel("可拖动调整顺序，双击可直接编辑")
+        keywords_hint = QLabel("选中后可用上下按钮调整顺序，双击可直接编辑")
         keywords_hint.setStyleSheet("color: gray;")
         keywords_header.addWidget(keywords_hint)
         keywords_layout.addLayout(keywords_header)
@@ -387,7 +389,11 @@ class RuleDialog(QDialog):
         keywords_layout.addLayout(keyword_input_layout)
 
         self.keywords_list = ReorderableKeywordList()
-        self.keywords_list.row_reordered.connect(self.move_keyword_row)
+        self.keywords_list.setDragEnabled(False)
+        self.keywords_list.setAcceptDrops(False)
+        self.keywords_list.viewport().setAcceptDrops(False)
+        self.keywords_list.setDropIndicatorShown(False)
+        self.keywords_list.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         self.keywords_list.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked |
             QAbstractItemView.EditTrigger.EditKeyPressed
@@ -395,6 +401,14 @@ class RuleDialog(QDialog):
         keywords_layout.addWidget(self.keywords_list)
 
         keyword_actions_layout = QHBoxLayout()
+        move_up_keyword_btn = QPushButton("上移")
+        move_up_keyword_btn.clicked.connect(self.move_selected_keyword_up)
+        keyword_actions_layout.addWidget(move_up_keyword_btn)
+
+        move_down_keyword_btn = QPushButton("下移")
+        move_down_keyword_btn.clicked.connect(self.move_selected_keyword_down)
+        keyword_actions_layout.addWidget(move_down_keyword_btn)
+
         keyword_actions_layout.addStretch()
         remove_keyword_btn = QPushButton("删除选中")
         remove_keyword_btn.clicked.connect(self.remove_selected_keyword)
@@ -545,6 +559,27 @@ class RuleDialog(QDialog):
         current_row = self.keywords_list.currentRow()
         if current_row >= 0:
             self.keywords_list.takeItem(current_row)
+
+    def move_selected_keyword_up(self):
+        self.move_selected_keyword(-1)
+
+    def move_selected_keyword_down(self):
+        self.move_selected_keyword(1)
+
+    def move_selected_keyword(self, step: int):
+        item_count = self.keywords_list.count()
+        if item_count <= 0:
+            return
+
+        current_row = self.keywords_list.currentRow()
+        if current_row < 0:
+            return
+
+        target_row = get_adjacent_row_index(current_row, item_count, step)
+        if target_row == current_row:
+            return
+
+        self.move_keyword_row(current_row, target_row)
 
     def move_keyword_row(self, source_row: int, target_row: int):
         keyword_texts = [self.keywords_list.item(index).text() for index in range(self.keywords_list.count())]
@@ -864,8 +899,7 @@ class ReorderableRulesTable(RangeSelectableRowsTable):
             event.ignore()
             return
 
-        if source_row < target_row:
-            target_row -= 1
+        target_row = normalize_reorder_target_row(source_row, target_row, self.rowCount())
 
         if source_row == target_row:
             event.accept()
@@ -1098,6 +1132,32 @@ class MainWindow(QMainWindow):
             QPushButton#stop_button:pressed {
                 background-color: #a12629;
             }
+            QPushButton[compactMoveButton="true"] {
+                padding: 0px;
+                min-width: 28px;
+                max-width: 28px;
+                min-height: 28px;
+                max-height: 28px;
+                font-size: 16px;
+                font-weight: bold;
+                color: #0b4f8a;
+                background-color: #e8f3ff;
+                border: 1px solid #7aaee6;
+                border-radius: 4px;
+            }
+            QPushButton[compactMoveButton="true"]:hover {
+                background-color: #d7ebff;
+                border: 1px solid #5f9de0;
+            }
+            QPushButton[compactMoveButton="true"]:pressed {
+                background-color: #c4e1ff;
+                border: 1px solid #4a8fd7;
+            }
+            QPushButton[compactMoveButton="true"]:disabled {
+                color: #90a4b7;
+                background-color: #eef3f8;
+                border: 1px solid #c8d5e3;
+            }
         """)
 
     def create_accounts_tab(self):
@@ -1162,7 +1222,7 @@ class MainWindow(QMainWindow):
 
         # 标题和添加按钮
         header_layout = QHBoxLayout()
-        header_layout.addWidget(QLabel("自动回复规则管理（可拖动整行调整优先级）"))
+        header_layout.addWidget(QLabel("自动回复规则管理（点击上下按钮调整优先级）"))
 
         # 搜索框
         self.rule_search_input = QLineEdit()
@@ -1182,13 +1242,24 @@ class MainWindow(QMainWindow):
         self.rules_table = ReorderableRulesTable()
         self.rules_table.setColumnCount(9)
         self.rules_table.setHorizontalHeaderLabels(["关键词", "回复内容", "匹配类型", "频道", "延迟", "忽略回复", "忽略@", "过滤关键词", "操作"])
-        self.rules_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        rules_header = self.rules_table.horizontalHeader()
+        rules_header.setStretchLastSection(False)
+        rules_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        rules_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for column in range(2, 8):
+            rules_header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        rules_header.setSectionResizeMode(8, QHeaderView.ResizeMode.Interactive)
+        self.rules_table.setColumnWidth(8, 220)
         self.rules_table.setAlternatingRowColors(True)
         self.rules_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.rules_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        self.rules_table.setDragEnabled(False)
+        self.rules_table.setAcceptDrops(False)
+        self.rules_table.viewport().setAcceptDrops(False)
+        self.rules_table.setDropIndicatorShown(False)
+        self.rules_table.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         self.rules_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.rules_table.customContextMenuRequested.connect(self.show_rules_context_menu)
-        self.rules_table.row_reordered.connect(self.move_rule_row)
         layout.addWidget(self.rules_table)
 
         # 统计信息
@@ -1476,19 +1547,37 @@ class MainWindow(QMainWindow):
             self.rules_table.setItem(row, 7, exclude_item)
 
             # 操作按钮
+            move_up_btn = QPushButton("↑")
+            move_up_btn.setProperty("compactMoveButton", True)
+            move_up_btn.setToolTip("上移一位")
+            move_up_btn.setFixedSize(28, 28)
+            move_up_btn.setEnabled(can_move_adjacent_row(row, len(self.discord_manager.rules), -1))
+            move_up_btn.clicked.connect(lambda checked, index=row: self.move_rule_by_step(index, -1))
+
+            move_down_btn = QPushButton("↓")
+            move_down_btn.setProperty("compactMoveButton", True)
+            move_down_btn.setToolTip("下移一位")
+            move_down_btn.setFixedSize(28, 28)
+            move_down_btn.setEnabled(can_move_adjacent_row(row, len(self.discord_manager.rules), 1))
+            move_down_btn.clicked.connect(lambda checked, index=row: self.move_rule_by_step(index, 1))
+
             edit_btn = QPushButton("编辑")
+            edit_btn.setMinimumWidth(48)
             edit_btn.clicked.connect(lambda checked, index=row: self.edit_rule_by_index(index))
 
             delete_btn = QPushButton("删除")
+            delete_btn.setMinimumWidth(48)
             delete_btn.clicked.connect(lambda checked, index=row: self.remove_rule_by_index(index))
 
             # 创建按钮容器
             button_widget = QWidget()
             button_layout = QHBoxLayout(button_widget)
-            button_layout.setContentsMargins(5, 2, 5, 2)
+            button_layout.setContentsMargins(2, 2, 2, 2)
+            button_layout.setSpacing(4)
+            button_layout.addWidget(move_up_btn)
+            button_layout.addWidget(move_down_btn)
             button_layout.addWidget(edit_btn)
             button_layout.addWidget(delete_btn)
-            button_layout.addStretch()
 
             self.rules_table.setCellWidget(row, 8, button_widget)
 
@@ -1500,10 +1589,18 @@ class MainWindow(QMainWindow):
         # 应用当前搜索过滤
         self.filter_rules()
 
+    def move_rule_by_step(self, source_row: int, step: int):
+        total_rules = len(self.discord_manager.rules)
+        if not can_move_adjacent_row(source_row, total_rules, step):
+            return
+
+        target_row = get_adjacent_row_index(source_row, total_rules, step)
+        self.move_rule_row(source_row, target_row)
+
     def move_rule_row(self, source_row: int, target_row: int):
-        """拖动规则整行后，更新底层规则顺序"""
+        """更新底层规则顺序"""
         if self.rule_search_input.text().strip():
-            QMessageBox.information(self, "提示", "请先清空搜索条件，再拖动规则排序")
+            QMessageBox.information(self, "提示", "请先清空搜索条件，再调整规则排序")
             self.update_rules_list()
             return
 

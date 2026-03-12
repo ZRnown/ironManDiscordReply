@@ -3,8 +3,11 @@ import unittest
 from src.gui_helpers import (
     apply_checked_indices,
     build_row_selection_range,
+    can_move_adjacent_row,
     ensure_flag_bits,
+    get_adjacent_row_index,
     move_item_in_list,
+    normalize_reorder_target_row,
     parse_selection_ranges,
     replace_item_preserving_order,
     split_keywords,
@@ -92,6 +95,69 @@ class MoveItemInListTests(unittest.TestCase):
         moved = move_item_in_list(original, 3, 1)
 
         self.assertEqual(moved, ["rule-1", "rule-4", "rule-2", "rule-3"])
+
+
+class NormalizeReorderTargetRowTests(unittest.TestCase):
+    def test_adjusts_downward_drop_to_final_insert_row(self):
+        self.assertEqual(
+            normalize_reorder_target_row(source_index=1, target_index=4, item_count=5),
+            3,
+        )
+
+    def test_keeps_upward_drop_row_unchanged(self):
+        self.assertEqual(
+            normalize_reorder_target_row(source_index=4, target_index=1, item_count=5),
+            1,
+        )
+
+    def test_maps_append_drop_to_last_insert_row(self):
+        self.assertEqual(
+            normalize_reorder_target_row(source_index=0, target_index=5, item_count=5),
+            4,
+        )
+
+
+class GetAdjacentRowIndexTests(unittest.TestCase):
+    def test_moves_selected_row_up_by_one(self):
+        self.assertEqual(
+            get_adjacent_row_index(current_index=2, item_count=4, step=-1),
+            1,
+        )
+
+    def test_moves_selected_row_down_by_one(self):
+        self.assertEqual(
+            get_adjacent_row_index(current_index=1, item_count=4, step=1),
+            2,
+        )
+
+    def test_keeps_top_row_when_moving_up(self):
+        self.assertEqual(
+            get_adjacent_row_index(current_index=0, item_count=4, step=-1),
+            0,
+        )
+
+    def test_keeps_bottom_row_when_moving_down(self):
+        self.assertEqual(
+            get_adjacent_row_index(current_index=3, item_count=4, step=1),
+            3,
+        )
+
+
+class CanMoveAdjacentRowTests(unittest.TestCase):
+    def test_allows_middle_row_to_move_up(self):
+        self.assertTrue(
+            can_move_adjacent_row(current_index=2, item_count=4, step=-1),
+        )
+
+    def test_blocks_top_row_from_moving_up(self):
+        self.assertFalse(
+            can_move_adjacent_row(current_index=0, item_count=4, step=-1),
+        )
+
+    def test_blocks_bottom_row_from_moving_down(self):
+        self.assertFalse(
+            can_move_adjacent_row(current_index=3, item_count=4, step=1),
+        )
 
 
 if __name__ == "__main__":
