@@ -1,11 +1,14 @@
 import unittest
+from dataclasses import dataclass
 
 from src.gui_helpers import (
     apply_checked_indices,
     build_row_selection_range,
     can_move_adjacent_row,
     ensure_flag_bits,
+    find_item_index_by_id,
     get_adjacent_row_index,
+    merge_flag_bits,
     move_item_in_list,
     normalize_reorder_target_row,
     parse_selection_ranges,
@@ -50,6 +53,30 @@ class ReplaceItemPreservingOrderTests(unittest.TestCase):
         self.assertEqual(original, ["acc-1", "acc-2", "acc-3"])
 
 
+@dataclass
+class FakeIdentifiableItem:
+    id: str
+
+
+class FindItemIndexByIdTests(unittest.TestCase):
+    def test_returns_current_index_for_matching_id(self):
+        items = [
+            FakeIdentifiableItem(id="rule-2"),
+            FakeIdentifiableItem(id="rule-3"),
+            FakeIdentifiableItem(id="rule-1"),
+        ]
+
+        self.assertEqual(find_item_index_by_id(items, "rule-1"), 2)
+
+    def test_returns_negative_one_when_id_is_missing(self):
+        items = [
+            FakeIdentifiableItem(id="rule-1"),
+            FakeIdentifiableItem(id="rule-2"),
+        ]
+
+        self.assertEqual(find_item_index_by_id(items, "rule-9"), -1)
+
+
 class BuildRowSelectionRangeTests(unittest.TestCase):
     def test_builds_inclusive_range_when_target_is_below_anchor(self):
         self.assertEqual(build_row_selection_range(2, 5), [2, 3, 4, 5])
@@ -78,6 +105,21 @@ class EnsureFlagBitsTests(unittest.TestCase):
             ensure_flag_bits(0b001, 0b010, 0b100),
             0b111,
         )
+
+
+class FakeFlag:
+    def __init__(self, bits: int):
+        self.bits = bits
+
+    def __or__(self, other):
+        return FakeFlag(self.bits | other.bits)
+
+
+class MergeFlagBitsTests(unittest.TestCase):
+    def test_supports_flag_objects_that_do_not_implement_int(self):
+        merged = merge_flag_bits(FakeFlag(0b001), FakeFlag(0b010), FakeFlag(0b100))
+
+        self.assertEqual(merged.bits, 0b111)
 
 
 class MoveItemInListTests(unittest.TestCase):

@@ -23,8 +23,9 @@ from gui_helpers import (
     apply_checked_indices,
     build_row_selection_range,
     can_move_adjacent_row,
-    ensure_flag_bits,
+    find_item_index_by_id,
     get_adjacent_row_index,
+    merge_flag_bits,
     move_item_in_list,
     normalize_reorder_target_row,
     parse_selection_ranges,
@@ -537,13 +538,13 @@ class RuleDialog(QDialog):
 
     def add_keyword_item(self, keyword: str):
         item = QListWidgetItem(keyword)
-        item_flags = ensure_flag_bits(
-            int(item.flags()),
-            int(Qt.ItemFlag.ItemIsEditable),
-            int(Qt.ItemFlag.ItemIsDragEnabled),
-            int(Qt.ItemFlag.ItemIsDropEnabled),
+        item_flags = merge_flag_bits(
+            item.flags(),
+            Qt.ItemFlag.ItemIsEditable,
+            Qt.ItemFlag.ItemIsDragEnabled,
+            Qt.ItemFlag.ItemIsDropEnabled,
         )
-        item.setFlags(Qt.ItemFlags(item_flags))
+        item.setFlags(item_flags)
         self.keywords_list.addItem(item)
 
     def add_keywords_from_input(self):
@@ -1489,7 +1490,7 @@ class MainWindow(QMainWindow):
             if len(rule.keywords) > 2:
                 keywords_str += "..."
             keywords_item = QTableWidgetItem(keywords_str)
-            keywords_item.setData(Qt.ItemDataRole.UserRole, row)
+            keywords_item.setData(Qt.ItemDataRole.UserRole, rule.id)
             keywords_item.setToolTip(", ".join(rule.keywords))  # 悬停显示所有关键词
             self.rules_table.setItem(row, 0, keywords_item)
 
@@ -1552,22 +1553,22 @@ class MainWindow(QMainWindow):
             move_up_btn.setToolTip("上移一位")
             move_up_btn.setFixedSize(28, 28)
             move_up_btn.setEnabled(can_move_adjacent_row(row, len(self.discord_manager.rules), -1))
-            move_up_btn.clicked.connect(lambda checked, index=row: self.move_rule_by_step(index, -1))
+            move_up_btn.clicked.connect(lambda checked, rule_id=rule.id: self.move_rule_by_id(rule_id, -1))
 
             move_down_btn = QPushButton("↓")
             move_down_btn.setProperty("compactMoveButton", True)
             move_down_btn.setToolTip("下移一位")
             move_down_btn.setFixedSize(28, 28)
             move_down_btn.setEnabled(can_move_adjacent_row(row, len(self.discord_manager.rules), 1))
-            move_down_btn.clicked.connect(lambda checked, index=row: self.move_rule_by_step(index, 1))
+            move_down_btn.clicked.connect(lambda checked, rule_id=rule.id: self.move_rule_by_id(rule_id, 1))
 
             edit_btn = QPushButton("编辑")
             edit_btn.setMinimumWidth(48)
-            edit_btn.clicked.connect(lambda checked, index=row: self.edit_rule_by_index(index))
+            edit_btn.clicked.connect(lambda checked, rule_id=rule.id: self.edit_rule_by_id(rule_id))
 
             delete_btn = QPushButton("删除")
             delete_btn.setMinimumWidth(48)
-            delete_btn.clicked.connect(lambda checked, index=row: self.remove_rule_by_index(index))
+            delete_btn.clicked.connect(lambda checked, rule_id=rule.id: self.remove_rule_by_id(rule_id))
 
             # 创建按钮容器
             button_widget = QWidget()
@@ -1596,6 +1597,18 @@ class MainWindow(QMainWindow):
 
         target_row = get_adjacent_row_index(source_row, total_rules, step)
         self.move_rule_row(source_row, target_row)
+
+    def get_rule_index_by_id(self, rule_id: str) -> int:
+        return find_item_index_by_id(self.discord_manager.rules, rule_id)
+
+    def move_rule_by_id(self, rule_id: str, step: int):
+        rule_index = self.get_rule_index_by_id(rule_id)
+        if rule_index < 0:
+            QMessageBox.warning(self, "错误", "规则不存在，列表将刷新")
+            self.update_rules_list()
+            return
+
+        self.move_rule_by_step(rule_index, step)
 
     def move_rule_row(self, source_row: int, target_row: int):
         """更新底层规则顺序"""
@@ -2089,37 +2102,55 @@ class MainWindow(QMainWindow):
 
     def edit_rule_by_index(self, index):
         """通过索引编辑规则"""
-        if 0 <= index < len(self.discord_manager.rules):
-            rule = self.discord_manager.rules[index]
-            dialog = RuleDialog(self, rule)
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                data = dialog.get_rule_data()
+        if not 0 <= index < len(self.discord_manager.rules):
+            QMessageBox.warning(self, "错误", "规则不存在，列表将刷新")
+            self.update_rules_list()
+            return
 
-                if not data['keywords'] or not data['reply']:
-                    QMessageBox.warning(self, "错误", "关键词和回复内容不能为空")
-                    return
+        rule = self.discord_manager.rules[index]
+        dialog = RuleDialog(self, rule)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            data = dialog.get_rule_data()
 
-                self.discord_manager.update_rule(
-                    index,
-                    keywords=data['keywords'],
-                    reply=data['reply'],
-                    match_type=MatchType(data['match_type']),
-                    target_channels=data['target_channels'],
-                    delay_min=data['delay_min'],
-                    delay_max=data['delay_max'],
-                    is_active=data['is_active'],
-                    ignore_replies=data.get('ignore_replies', False),
-                    ignore_mentions=data.get('ignore_mentions', False),
-                    case_sensitive=data.get('case_sensitive', False),
-                    exclude_keywords=data.get('exclude_keywords', [])
-                )
+            if not data['keywords'] or not data['reply']:
+                QMessageBox.warning(self, "错误", "关键词和回复内容不能为空")
+                return
 
-                self.update_rules_list()
-                self.save_config()
-                QMessageBox.information(self, "成功", "规则编辑成功")
+            self.discord_manager.update_rule(
+                index,
+                keywords=data['keywords'],
+                reply=data['reply'],
+                match_type=MatchType(data['match_type']),
+                target_channels=data['target_channels'],
+                delay_min=data['delay_min'],
+                delay_max=data['delay_max'],
+                is_active=data['is_active'],
+                ignore_replies=data.get('ignore_replies', False),
+                ignore_mentions=data.get('ignore_mentions', False),
+                case_sensitive=data.get('case_sensitive', False),
+                exclude_keywords=data.get('exclude_keywords', [])
+            )
+
+            self.update_rules_list()
+            self.save_config()
+            QMessageBox.information(self, "成功", "规则编辑成功")
+
+    def edit_rule_by_id(self, rule_id: str):
+        rule_index = self.get_rule_index_by_id(rule_id)
+        if rule_index < 0:
+            QMessageBox.warning(self, "错误", "规则不存在，列表将刷新")
+            self.update_rules_list()
+            return
+
+        self.edit_rule_by_index(rule_index)
 
     def remove_rule_by_index(self, index):
         """通过索引删除规则"""
+        if not 0 <= index < len(self.discord_manager.rules):
+            QMessageBox.warning(self, "错误", "规则不存在，列表将刷新")
+            self.update_rules_list()
+            return
+
         reply = QMessageBox.question(
             self, "确认删除",
             f"确定要删除规则 {index+1} 吗？",
@@ -2130,6 +2161,15 @@ class MainWindow(QMainWindow):
             self.discord_manager.remove_rule(index)
             self.update_rules_list()
             self.save_config()
+
+    def remove_rule_by_id(self, rule_id: str):
+        rule_index = self.get_rule_index_by_id(rule_id)
+        if rule_index < 0:
+            QMessageBox.warning(self, "错误", "规则不存在，列表将刷新")
+            self.update_rules_list()
+            return
+
+        self.remove_rule_by_index(rule_index)
 
     def remove_multiple_rules(self, indices):
         """批量删除多个规则"""

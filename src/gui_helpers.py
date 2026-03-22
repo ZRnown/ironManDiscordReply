@@ -2,6 +2,7 @@ import re
 from typing import List, Sequence, TypeVar
 
 T = TypeVar("T")
+FlagT = TypeVar("FlagT")
 
 
 def split_keywords(text: str) -> List[str]:
@@ -71,11 +72,22 @@ def apply_checked_indices(checked_states: Sequence[bool], indices: Sequence[int]
     return updated_states
 
 
-def ensure_flag_bits(base_flags: int, *required_bits: int) -> int:
+def merge_flag_bits(base_flags: FlagT, *required_bits: FlagT) -> FlagT:
     merged_flags = base_flags
     for bit in required_bits:
-        merged_flags |= bit
+        merged_flags = merged_flags | bit
     return merged_flags
+
+
+def ensure_flag_bits(base_flags: int, *required_bits: int) -> int:
+    return merge_flag_bits(base_flags, *required_bits)
+
+
+def find_item_index_by_id(items: Sequence[object], item_id: str) -> int:
+    for index, item in enumerate(items):
+        if getattr(item, "id", None) == item_id:
+            return index
+    return -1
 
 
 def can_move_adjacent_row(current_index: int, item_count: int, step: int) -> bool:
