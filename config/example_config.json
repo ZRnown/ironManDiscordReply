@@ -3,39 +3,41 @@
     {
       "token": "YOUR_DISCORD_TOKEN_HERE",
       "alias": "MyAccount",
-      "is_active": true
+      "is_active": true,
+      "target_channels": [123456789012345678]
     }
   ],
+  "block_settings": {
+    "blocked_keywords": ["http", "discord.gg"],
+    "blocked_user_ids": ["123456789012345678"],
+    "account_scope": "all",
+    "account_tokens": [],
+    "case_sensitive": false
+  },
   "rules": [
     {
       "keywords": ["你好", "hello", "hi"],
       "reply": "你好！我是自动回复机器人。",
       "match_type": "partial",
-      "target_channels": [],
       "delay_min": 2.0,
       "delay_max": 5.0,
-      "is_active": true,
-      "exclude_keywords": ["http"]
+      "is_active": true
     },
     {
       "keywords": ["价格", "price", "多少钱"],
       "reply": "请访问我们的官网查看最新价格信息：https://example.com/pricing",
       "match_type": "partial",
-      "target_channels": [123456789012345678],
       "delay_min": 3.0,
       "delay_max": 7.0,
-      "is_active": true,
-      "exclude_keywords": []
+      "is_active": true
     },
     {
       "keywords": "^help$",
       "reply": "我可以帮您自动回复消息！输入关键词即可触发回复。",
       "match_type": "regex",
-      "target_channels": [],
       "delay_min": 1.0,
       "delay_max": 3.0,
-      "is_active": true,
-      "exclude_keywords": []
+      "is_active": true
     }
   ]
 }

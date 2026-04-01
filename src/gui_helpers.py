@@ -9,6 +9,30 @@ def split_keywords(text: str) -> List[str]:
     return [keyword.strip() for keyword in re.split(r"[,\n，;；]+", text) if keyword.strip()]
 
 
+def parse_channel_ids(text: str) -> List[int]:
+    channel_text = text.strip()
+    if not channel_text:
+        return []
+
+    channel_ids = []
+    seen_channel_ids = set()
+
+    for segment in re.split(r"[,，;；\s]+", channel_text):
+        cleaned_segment = segment.strip()
+        if not cleaned_segment:
+            continue
+        if not cleaned_segment.isdigit():
+            raise ValueError(f"频道ID只能填数字，发现无效内容：{cleaned_segment}")
+
+        channel_id = int(cleaned_segment)
+        if channel_id in seen_channel_ids:
+            continue
+        channel_ids.append(channel_id)
+        seen_channel_ids.add(channel_id)
+
+    return channel_ids
+
+
 def parse_selection_ranges(text: str, total_count: int) -> List[int]:
     if total_count <= 0:
         return []

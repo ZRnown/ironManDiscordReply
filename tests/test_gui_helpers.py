@@ -11,6 +11,7 @@ from src.gui_helpers import (
     merge_flag_bits,
     move_item_in_list,
     normalize_reorder_target_row,
+    parse_channel_ids,
     parse_selection_ranges,
     replace_item_preserving_order,
     split_keywords,
@@ -23,6 +24,18 @@ class SplitKeywordsTests(unittest.TestCase):
             split_keywords(" hello，world; foo；bar\n baz "),
             ["hello", "world", "foo", "bar", "baz"],
         )
+
+
+class ParseChannelIdsTests(unittest.TestCase):
+    def test_supports_multiple_separators_and_deduplicates(self):
+        self.assertEqual(
+            parse_channel_ids("123, 456\n789；456 123"),
+            [123, 456, 789],
+        )
+
+    def test_rejects_non_numeric_values(self):
+        with self.assertRaises(ValueError):
+            parse_channel_ids("123, abc")
 
 
 class ParseSelectionRangesTests(unittest.TestCase):

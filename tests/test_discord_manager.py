@@ -1,7 +1,9 @@
 import asyncio
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
+import discord
 from src.discord_client import Account, DiscordManager
 
 
@@ -46,6 +48,56 @@ class FakeClient:
         cls.stop_calls = 0
 
 
+class FakeMessageSender:
+    def __init__(self, side_effects=None):
+        self.side_effects = list(side_effects or [])
+        self.sent_messages = []
+
+    async def send(self, content=None, **kwargs):
+        self.sent_messages.append({"content": content, "kwargs": kwargs})
+
+        if self.side_effects:
+            effect = self.side_effects.pop(0)
+            if isinstance(effect, Exception):
+                raise effect
+
+        return object()
+
+
+class FakeRotationClient:
+    def __init__(self, account, sender=None):
+        self.account = account
+        self.sender = sender or FakeMessageSender()
+        self.requests = []
+
+    def get_partial_messageable(self, channel_id, **kwargs):
+        self.requests.append({"channel_id": channel_id, "kwargs": kwargs})
+        return self.sender
+
+
+class FakeMessage:
+    def __init__(self, channel_id=123, guild_id=456, message_id=789):
+        self.id = message_id
+        self.channel = SimpleNamespace(id=channel_id, name="general")
+        self.guild = SimpleNamespace(id=guild_id)
+        self.reply_calls = []
+        self.reference_calls = []
+
+    def to_reference(self, **kwargs):
+        self.reference_calls.append(kwargs)
+        return {"message_id": self.id, **kwargs}
+
+    async def reply(self, content=None, **kwargs):
+        self.reply_calls.append({"content": content, "kwargs": kwargs})
+        return object()
+
+
+def build_http_exception(code, message="request failed"):
+    response = SimpleNamespace(status=429, reason="Too Many Requests")
+    payload = {"code": code, "message": message}
+    return discord.HTTPException(response, payload)
+
+
 class DiscordManagerStartupTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         FakeClient.reset()
@@ -82,6 +134,84 @@ class DiscordManagerStartupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager.client_tasks, {})
         self.assertEqual(self.manager.clients, [])
         self.assertEqual(FakeClient.stop_calls, len(self.manager.accounts))
+
+    async def test_rotation_only_uses_accounts_allowed_for_channel(self):
+        self.manager.rotation_enabled = True
+        self.manager.accounts = [
+            Account(
+                token="token-1",
+                is_active=True,
+                is_valid=True,
+                target_channels=[111],
+            ),
+            Account(
+                token="token-2",
+                is_active=True,
+                is_valid=True,
+                target_channels=[222],
+            ),
+        ]
+
+        selected_account = self.manager.get_next_available_account(channel_id=222)
+
+        self.assertIsNotNone(selected_account)
+        self.assertEqual(selected_account.token, "token-2")
+
+    async def test_send_rotated_reply_uses_selected_client_context(self):
+        self.manager.rotation_enabled = True
+        self.manager.accounts = [
+            Account(token="token-1", is_active=True, is_valid=True),
+            Account(token="token-2", is_active=True, is_valid=True),
+        ]
+        self.manager.current_rotation_index = 1
+
+        client_one = FakeRotationClient(self.manager.accounts[0])
+        client_two = FakeRotationClient(self.manager.accounts[1])
+        self.manager.clients = [client_one, client_two]
+
+        message = FakeMessage(channel_id=222, guild_id=333, message_id=999)
+
+        success = await self.manager.send_rotated_reply(message, "hello world")
+
+        self.assertTrue(success)
+        self.assertEqual(message.reply_calls, [])
+        self.assertEqual(client_one.sender.sent_messages, [])
+        self.assertEqual(len(client_two.sender.sent_messages), 1)
+        self.assertEqual(client_two.sender.sent_messages[0]["content"], "hello world")
+        self.assertEqual(
+            client_two.sender.sent_messages[0]["kwargs"]["reference"],
+            {"message_id": 999, "fail_if_not_exists": False},
+        )
+        self.assertFalse(client_two.sender.sent_messages[0]["kwargs"]["mention_author"])
+        self.assertIn(999, self.manager.replied_messages)
+
+    async def test_send_rotated_reply_tries_next_account_after_slowmode(self):
+        self.manager.rotation_enabled = True
+        self.manager.accounts = [
+            Account(token="token-1", is_active=True, is_valid=True),
+            Account(token="token-2", is_active=True, is_valid=True),
+        ]
+        self.manager.current_rotation_index = 0
+
+        slowmode_sender = FakeMessageSender(
+            side_effects=[build_http_exception(20016, "slowmode")]
+        )
+        fallback_sender = FakeMessageSender()
+        self.manager.clients = [
+            FakeRotationClient(self.manager.accounts[0], sender=slowmode_sender),
+            FakeRotationClient(self.manager.accounts[1], sender=fallback_sender),
+        ]
+
+        message = FakeMessage(channel_id=222, guild_id=333, message_id=1001)
+
+        success = await self.manager.send_rotated_reply(message, "fallback reply")
+
+        self.assertTrue(success)
+        self.assertIsNotNone(self.manager.accounts[0].rate_limit_until)
+        self.assertEqual(len(fallback_sender.sent_messages), 1)
+        self.assertEqual(fallback_sender.sent_messages[0]["content"], "fallback reply")
+        self.assertIn(1001, self.manager.replied_messages)
+        self.assertEqual(message.reply_calls, [])
 
 
 if __name__ == "__main__":

@@ -25,12 +25,17 @@ class Account:
     last_verified: Optional[float] = None  # 最后验证时间
     user_info: Optional[Dict] = None  # 用户信息
     rule_ids: List[str] = None  # 关联的规则ID列表
+    target_channels: List[int] = None  # 账号生效频道列表，空表示全部频道
     last_sent_time: Optional[float] = None  # 最后发送消息时间
     rate_limit_until: Optional[float] = None  # 频率限制到期时间
 
     def __post_init__(self):
         if self.rule_ids is None:
             self.rule_ids = []
+        if self.target_channels is None:
+            self.target_channels = []
+        else:
+            self.target_channels = self._normalize_channel_ids(self.target_channels)
 
     @property
     def alias(self) -> str:
@@ -38,6 +43,31 @@ class Account:
         if self.user_info and isinstance(self.user_info, dict):
             return f"{self.user_info.get('name', 'Unknown')}#{self.user_info.get('discriminator', '0000')}"
         return f"Token-{self.token[:8]}..."
+
+    @staticmethod
+    def _normalize_channel_ids(channel_ids: Optional[List[int]]) -> List[int]:
+        normalized_ids = []
+        seen_ids = set()
+
+        for channel_id in channel_ids or []:
+            try:
+                cleaned_id = int(str(channel_id).strip())
+            except (TypeError, ValueError):
+                continue
+
+            if cleaned_id in seen_ids:
+                continue
+            normalized_ids.append(cleaned_id)
+            seen_ids.add(cleaned_id)
+
+        return normalized_ids
+
+    def allows_channel(self, channel_id: Optional[int]) -> bool:
+        if not self.target_channels:
+            return True
+        if channel_id is None:
+            return False
+        return int(channel_id) in self.target_channels
 
 
 @dataclass
@@ -54,6 +84,63 @@ class Rule:
     ignore_mentions: bool = True  # 是否忽略包含@他人的消息
     case_sensitive: bool = False  # 是否区分大小写，False表示不区分大小写
     exclude_keywords: List[str] = field(default_factory=list)  # 触发后不回复的过滤关键词
+
+
+@dataclass
+class BlockSettings:
+    blocked_keywords: List[str] = field(default_factory=list)
+    blocked_user_ids: List[str] = field(default_factory=list)
+    account_scope: str = "all"  # all | selected
+    account_tokens: List[str] = field(default_factory=list)
+    case_sensitive: bool = False
+
+    def __post_init__(self):
+        self.blocked_keywords = self._normalize_values(self.blocked_keywords)
+        self.blocked_user_ids = self._normalize_values(self.blocked_user_ids)
+        self.account_tokens = self._normalize_values(self.account_tokens)
+        if self.account_scope not in {"all", "selected"}:
+            self.account_scope = "all"
+
+    @staticmethod
+    def _normalize_values(values: Optional[List[str]]) -> List[str]:
+        normalized_values = []
+        seen_values = set()
+
+        for value in values or []:
+            cleaned_value = str(value).strip()
+            if not cleaned_value or cleaned_value in seen_values:
+                continue
+            normalized_values.append(cleaned_value)
+            seen_values.add(cleaned_value)
+
+        return normalized_values
+
+    def applies_to_account(self, account: Account) -> bool:
+        if self.account_scope != "selected":
+            return True
+        return account.token in self.account_tokens
+
+    def blocks_content(self, content: str) -> bool:
+        if not content or not self.blocked_keywords:
+            return False
+
+        if self.case_sensitive:
+            return any(keyword in content for keyword in self.blocked_keywords)
+
+        content_lower = content.lower()
+        return any(keyword.lower() in content_lower for keyword in self.blocked_keywords)
+
+    def blocks_user(self, author_id: Optional[str]) -> bool:
+        if author_id is None:
+            return False
+        return str(author_id).strip() in self.blocked_user_ids
+
+    def should_block_message(self, account: Account, content: str, author_id: Optional[str]) -> bool:
+        if not self.applies_to_account(account):
+            return False
+        if self.blocks_user(author_id):
+            return True
+        return self.blocks_content(content)
 
 
 class AutoReplyClient(discord.Client):
@@ -122,20 +209,20 @@ class AutoReplyClient(discord.Client):
         except:
             pass  # 如果无法检查，跳过
 
+        if self._is_blocked_message(message):
+            return
+
+        if not self.account.allows_channel(getattr(message.channel, "id", None)):
+            return
+
         for rule in self.rules:
             if not rule.is_active:
-                continue
-
-            if rule.target_channels and message.channel.id not in rule.target_channels:
                 continue
 
             if rule.ignore_replies and message.reference is not None:
                 continue
 
             if rule.ignore_mentions and message.mentions:
-                continue
-
-            if self._is_filtered_message(message.content, rule):
                 continue
 
             if self._check_match(message.content, rule):
@@ -164,11 +251,12 @@ class AutoReplyClient(discord.Client):
                     # 检查是否启用轮换模式
                     if (self.discord_manager and
                         self.discord_manager.rotation_enabled and
-                        rule.target_channels and
-                        message.channel.id in rule.target_channels):
+                        self.account.allows_channel(getattr(message.channel, "id", None))):
                         # 使用轮换模式
                         success = await self.discord_manager.send_rotated_reply(
-                            message, rule.reply, rule.keywords[0] if rule.keywords else ""
+                            message,
+                            rule.reply,
+                            rule.keywords[0] if rule.keywords else "",
                         )
                         if success:
                             success_msg = f"[{self.account.alias}] ✅ 轮换回复成功"
@@ -225,16 +313,32 @@ class AutoReplyClient(discord.Client):
 
         return False
 
-    def _is_filtered_message(self, content: str, rule: Rule) -> bool:
-        """检查消息是否命中过滤关键词"""
-        if not content or not rule.exclude_keywords:
+    def _is_blocked_message(self, message) -> bool:
+        block_settings = getattr(self.discord_manager, "block_settings", None)
+        if not block_settings:
             return False
 
-        if rule.case_sensitive:
-            return any(keyword in content for keyword in rule.exclude_keywords)
+        author_id = getattr(message.author, "id", None)
+        content = getattr(message, "content", "") or ""
 
-        content_lower = content.lower()
-        return any(keyword.lower() in content_lower for keyword in rule.exclude_keywords)
+        if not block_settings.applies_to_account(self.account):
+            return False
+
+        if block_settings.blocks_user(author_id):
+            block_msg = f"[{self.account.alias}] 🚫 命中屏蔽用户ID: {author_id}"
+            print(block_msg)
+            if self.log_callback:
+                self.log_callback(block_msg)
+            return True
+
+        if block_settings.blocks_content(content):
+            block_msg = f"[{self.account.alias}] 🚫 命中屏蔽关键词 | 消息: '{content}'"
+            print(block_msg)
+            if self.log_callback:
+                self.log_callback(block_msg)
+            return True
+
+        return False
 
     async def start_client(self):
         self.is_running = False
@@ -449,6 +553,7 @@ class DiscordManager:
         self.client_tasks: Dict[str, asyncio.Task] = {}
         self.accounts: List[Account] = []
         self.rules: List[Rule] = []
+        self.block_settings = BlockSettings()
         self.is_running = False
         self.validator = TokenValidator()
         self.log_callback = log_callback
@@ -464,6 +569,44 @@ class DiscordManager:
         self.replied_messages: Set[int] = set()
         self.max_replied_messages: int = 1000  # 最多跟踪1000条消息
 
+    def _get_available_accounts(self, channel_id: Optional[int] = None) -> List[Account]:
+        return [
+            acc for acc in self.accounts
+            if acc.is_active and acc.is_valid and acc.allows_channel(channel_id)
+        ]
+
+    @staticmethod
+    def _can_account_send_now(account: Account, current_time: Optional[float] = None) -> bool:
+        current_time = time.time() if current_time is None else current_time
+        return account.rate_limit_until is None or current_time >= account.rate_limit_until
+
+    @staticmethod
+    def _build_message_reference(message):
+        if not hasattr(message, "to_reference"):
+            return None
+
+        try:
+            return message.to_reference(fail_if_not_exists=False)
+        except TypeError:
+            try:
+                return message.to_reference()
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    def _find_client_for_account(self, account: Account) -> Optional[AutoReplyClient]:
+        return next((client for client in self.clients if client.account.token == account.token), None)
+
+    def _trim_replied_messages(self):
+        if len(self.replied_messages) <= self.max_replied_messages:
+            return
+
+        sorted_messages = sorted(self.replied_messages)
+        remove_count = len(sorted_messages) // 2
+        for msg_id in sorted_messages[:remove_count]:
+            self.replied_messages.remove(msg_id)
+
     async def add_account_async(self, token: str) -> Tuple[bool, Optional[str]]:
         if any(acc.token == token for acc in self.accounts):
             return False, "Token已存在"
@@ -476,7 +619,8 @@ class DiscordManager:
             is_active=True,
             is_valid=is_valid or False,
             last_verified=time.time(),
-            user_info=user_info
+            user_info=user_info,
+            target_channels=[],
         )
 
         self.accounts.append(account)
@@ -489,7 +633,7 @@ class DiscordManager:
         self.accounts = [acc for acc in self.accounts if acc.token != token]
 
     def add_rule(self, keywords: List[str], reply: str, match_type: MatchType,
-                 target_channels: List[int], delay_min: float = 0.1, delay_max: float = 1.0,
+                 delay_min: float = 0.1, delay_max: float = 1.0,
                  ignore_replies: bool = True, ignore_mentions: bool = True,
                  case_sensitive: bool = False, exclude_keywords: Optional[List[str]] = None):
         """添加规则"""
@@ -502,7 +646,7 @@ class DiscordManager:
             keywords=keywords,
             reply=reply,
             match_type=match_type,
-            target_channels=target_channels,
+            target_channels=[],
             delay_min=delay_min,
             delay_max=delay_max,
             ignore_replies=ignore_replies,
@@ -619,36 +763,26 @@ class DiscordManager:
 
         return results
 
-    def get_next_available_account(self) -> Optional[Account]:
+    def get_next_available_account(self, channel_id: Optional[int] = None) -> Optional[Account]:
         """获取下一个可用的账号（用于轮换）"""
         if not self.rotation_enabled or not self.accounts:
             return None
 
-        # 查找所有有效的活跃账号
-        available_accounts = [acc for acc in self.accounts if acc.is_active and acc.is_valid]
+        available_accounts = self._get_available_accounts(channel_id)
 
         if not available_accounts:
             return None
 
-        # 检查当前账号是否可以发送
         current_time = time.time()
-        current_account = available_accounts[self.current_rotation_index % len(available_accounts)]
+        start_index = self.current_rotation_index % len(available_accounts)
 
-        # 如果当前账号没有频率限制或限制已过期，可以使用
-        if (current_account.rate_limit_until is None or
-            current_time >= current_account.rate_limit_until):
-            return current_account
-
-        # 否则，寻找下一个可用的账号
-        for i in range(1, len(available_accounts)):
-            next_index = (self.current_rotation_index + i) % len(available_accounts)
+        for offset in range(len(available_accounts)):
+            next_index = (start_index + offset) % len(available_accounts)
             account = available_accounts[next_index]
-            if (account.rate_limit_until is None or
-                current_time >= account.rate_limit_until):
+            if self._can_account_send_now(account, current_time):
                 self.current_rotation_index = next_index
                 return account
 
-        # 如果所有账号都被限制，返回None
         return None
 
     async def send_rotated_reply(self, message, reply_text: str, rule_name: str = "") -> bool:
@@ -662,68 +796,74 @@ class DiscordManager:
                 self.log_callback(f"⚠️ 消息 {message.id} 已被回复，跳过轮换回复")
             return False
 
-        account = self.get_next_available_account()
-        if not account:
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
+        if channel_id is None:
             if self.log_callback:
-                self.log_callback(f"❌ 所有账号都被频率限制，无法发送回复")
+                self.log_callback("❌ 无法识别消息频道，跳过轮换回复")
             return False
 
-        # 查找对应的客户端
-        client = next((c for c in self.clients if c.account.token == account.token), None)
-        if not client:
+        available_accounts = self._get_available_accounts(channel_id)
+        if not available_accounts:
             if self.log_callback:
-                self.log_callback(f"❌ 找不到账号 {account.alias} 的客户端")
+                self.log_callback("❌ 没有可用于当前频道的轮换账号")
             return False
 
-        try:
-            # 标记这条消息已被回复
-            self.replied_messages.add(message.id)
+        start_index = self.current_rotation_index % len(available_accounts)
+        message_reference = self._build_message_reference(message)
+        guild_id = getattr(getattr(message, "guild", None), "id", None)
 
-            # 清理过期的消息ID（保持内存使用合理）
-            if len(self.replied_messages) > self.max_replied_messages:
-                # 移除最旧的一半消息
-                sorted_messages = sorted(self.replied_messages)
-                remove_count = len(sorted_messages) // 2
-                for msg_id in sorted_messages[:remove_count]:
-                    self.replied_messages.remove(msg_id)
-
-            # 更新账号的最后发送时间
+        for offset in range(len(available_accounts)):
+            account_index = (start_index + offset) % len(available_accounts)
+            account = available_accounts[account_index]
             current_time = time.time()
-            account.last_sent_time = current_time
 
-            # 发送消息
-            await message.reply(reply_text)
+            if not self._can_account_send_now(account, current_time):
+                continue
 
-            # 移动到下一个账号
-            available_accounts = [acc for acc in self.accounts if acc.is_active and acc.is_valid]
-            if available_accounts:
-                self.current_rotation_index = (self.current_rotation_index + 1) % len(available_accounts)
-
-            if self.log_callback:
-                self.log_callback(f"✅ [{account.alias}] 轮换回复成功: '{reply_text[:50]}...'")
-
-            return True
-
-        except discord.HTTPException as e:
-            # 检查是否是频率限制错误
-            if e.code == 20016:  # 慢速模式
-                account.rate_limit_until = current_time + 600  # 10分钟限制
+            client = self._find_client_for_account(account)
+            if not client:
                 if self.log_callback:
-                    self.log_callback(f"⚠️ [{account.alias}] 触发慢速模式，10分钟内无法发送")
-            elif e.code == 50035:  # 无效表单内容
-                if self.log_callback:
-                    self.log_callback(f"❌ [{account.alias}] 发送失败: 无效内容")
-            else:
-                if self.log_callback:
-                    self.log_callback(f"❌ [{account.alias}] 发送失败: HTTP {e.code}")
+                    self.log_callback(f"❌ 找不到账号 {account.alias} 的客户端")
+                continue
 
-            # 尝试下一个账号
-            return await self.send_rotated_reply(message, reply_text, rule_name)
+            try:
+                target_channel = client.get_partial_messageable(channel_id, guild_id=guild_id)
+                send_kwargs = {"mention_author": False}
+                if message_reference is not None:
+                    send_kwargs["reference"] = message_reference
+                await target_channel.send(reply_text, **send_kwargs)
 
-        except Exception as e:
-            if self.log_callback:
-                self.log_callback(f"❌ [{account.alias}] 发送异常: {str(e)}")
-            return False
+                self.replied_messages.add(message.id)
+                self._trim_replied_messages()
+
+                account.last_sent_time = current_time
+                self.current_rotation_index = (account_index + 1) % len(available_accounts)
+
+                if self.log_callback:
+                    self.log_callback(f"✅ [{account.alias}] 轮换回复成功: '{reply_text[:50]}...'")
+
+                return True
+
+            except discord.HTTPException as e:
+                if e.code == 20016:  # 慢速模式
+                    account.rate_limit_until = current_time + 600  # 10分钟限制
+                    if self.log_callback:
+                        self.log_callback(f"⚠️ [{account.alias}] 触发慢速模式，切换下一个账号继续发送")
+                elif e.code == 50035:  # 无效表单内容
+                    if self.log_callback:
+                        self.log_callback(f"❌ [{account.alias}] 发送失败: 无效内容")
+                    return False
+                else:
+                    if self.log_callback:
+                        self.log_callback(f"❌ [{account.alias}] 发送失败: HTTP {e.code}")
+
+            except Exception as e:
+                if self.log_callback:
+                    self.log_callback(f"❌ [{account.alias}] 发送异常: {str(e)}")
+
+        if self.log_callback:
+            self.log_callback("❌ 当前没有可立即发送的轮换账号")
+        return False
 
     async def revalidate_account(self, token: str) -> Tuple[bool, Optional[str]]:
         """重新验证指定账号的Token"""

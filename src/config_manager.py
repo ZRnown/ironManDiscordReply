@@ -7,7 +7,7 @@ from dataclasses import asdict
 # 添加src目录到Python路径（确保打包后能找到模块）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from discord_client import Account, Rule, MatchType
+from discord_client import Account, Rule, MatchType, BlockSettings
 
 
 class ConfigManager:
@@ -21,7 +21,47 @@ class ConfigManager:
         if not os.path.exists(self.config_dir):
             os.makedirs(self.config_dir)
 
-    def save_config(self, accounts: List[Account], rules: List[Rule]):
+    @staticmethod
+    def _dedupe_int_values(values: List[Any]) -> List[int]:
+        normalized_values = []
+        seen_values = set()
+
+        for value in values or []:
+            try:
+                cleaned_value = int(str(value).strip())
+            except (TypeError, ValueError):
+                continue
+
+            if cleaned_value in seen_values:
+                continue
+            normalized_values.append(cleaned_value)
+            seen_values.add(cleaned_value)
+
+        return normalized_values
+
+    @classmethod
+    def _derive_account_target_channels(cls, account_data: Dict[str, Any], rules: List[Rule]) -> List[int]:
+        existing_channels = cls._dedupe_int_values(account_data.get("target_channels", []))
+        if existing_channels:
+            return existing_channels
+
+        assigned_rule_ids = set(account_data.get("rule_ids", []))
+        if not assigned_rule_ids:
+            return []
+
+        assigned_rules = [rule for rule in rules if rule.id in assigned_rule_ids]
+        if not assigned_rules:
+            return []
+
+        if any(not getattr(rule, "target_channels", []) for rule in assigned_rules):
+            return []
+
+        merged_channels = []
+        for rule in assigned_rules:
+            merged_channels.extend(getattr(rule, "target_channels", []))
+        return cls._dedupe_int_values(merged_channels)
+
+    def save_config(self, accounts: List[Account], rules: List[Rule], block_settings: BlockSettings):
         """保存配置到文件"""
         config_data = {
             "accounts": [
@@ -31,24 +71,30 @@ class ConfigManager:
                     "is_valid": acc.is_valid,
                     "last_verified": acc.last_verified,
                     "user_info": acc.user_info,
-                    "rule_ids": acc.rule_ids
+                    "rule_ids": acc.rule_ids,
+                    "target_channels": acc.target_channels,
                 }
                 for acc in accounts
             ],
+            "block_settings": {
+                "blocked_keywords": block_settings.blocked_keywords,
+                "blocked_user_ids": block_settings.blocked_user_ids,
+                "account_scope": block_settings.account_scope,
+                "account_tokens": block_settings.account_tokens,
+                "case_sensitive": block_settings.case_sensitive,
+            },
             "rules": [
                 {
                     "id": rule.id,
                     "keywords": rule.keywords,
                     "reply": rule.reply,
                     "match_type": rule.match_type.value,
-                    "target_channels": rule.target_channels,
                     "delay_min": rule.delay_min,
                     "delay_max": rule.delay_max,
                     "is_active": rule.is_active,
                     "ignore_replies": getattr(rule, 'ignore_replies', False),
                     "ignore_mentions": getattr(rule, 'ignore_mentions', False),
-                    "case_sensitive": getattr(rule, 'case_sensitive', False),
-                    "exclude_keywords": getattr(rule, 'exclude_keywords', [])
+                    "case_sensitive": getattr(rule, 'case_sensitive', False)
                 }
                 for rule in rules
             ]
@@ -62,55 +108,88 @@ class ConfigManager:
             print(f"保存配置失败: {e}")
             return False
 
-    def load_config(self) -> tuple[List[Account], List[Rule]]:
+    def load_config(self) -> tuple[List[Account], List[Rule], BlockSettings]:
         """从文件加载配置"""
         if not os.path.exists(self.config_file):
-            return [], []
+            return [], [], BlockSettings()
 
         try:
             with open(self.config_file, 'r', encoding='utf-8') as f:
                 config_data = json.load(f)
 
-            accounts = []
-            for acc_data in config_data.get("accounts", []):
-                account = Account(
-                    token=acc_data["token"],
-                    is_active=acc_data.get("is_active", True),
-                    is_valid=acc_data.get("is_valid", False),
-                    last_verified=acc_data.get("last_verified"),
-                    user_info=acc_data.get("user_info"),
-                    rule_ids=acc_data.get("rule_ids", [])
-                )
-                accounts.append(account)
-
+            accounts_data = config_data.get("accounts", [])
             rules = []
+            legacy_blocked_keywords = []
             for rule_data in config_data.get("rules", []):
                 exclude_keywords = rule_data.get("exclude_keywords", [])
                 if isinstance(exclude_keywords, str):
                     exclude_keywords = [exclude_keywords]
+                legacy_blocked_keywords.extend(exclude_keywords)
                 rule = Rule(
                     id=rule_data.get("id", f"rule_{len(rules)}"),  # 如果没有id，生成一个
                     keywords=rule_data["keywords"],
                     reply=rule_data["reply"],
                     match_type=MatchType(rule_data["match_type"]),
-                    target_channels=rule_data["target_channels"],
+                    target_channels=[],
                     delay_min=rule_data.get("delay_min", 2.0),
                     delay_max=rule_data.get("delay_max", 5.0),
                     is_active=rule_data.get("is_active", True),
                     ignore_replies=rule_data.get("ignore_replies", False),
                     ignore_mentions=rule_data.get("ignore_mentions", False),
                     case_sensitive=rule_data.get("case_sensitive", False),
-                    exclude_keywords=exclude_keywords
+                    exclude_keywords=[]
                 )
                 rules.append(rule)
 
-            return accounts, rules
+            for rule, rule_data in zip(rules, config_data.get("rules", [])):
+                rule.target_channels = self._dedupe_int_values(rule_data.get("target_channels", []))
+
+            accounts = []
+            for acc_data in accounts_data:
+                account = Account(
+                    token=acc_data["token"],
+                    is_active=acc_data.get("is_active", True),
+                    is_valid=acc_data.get("is_valid", False),
+                    last_verified=acc_data.get("last_verified"),
+                    user_info=acc_data.get("user_info"),
+                    rule_ids=acc_data.get("rule_ids", []),
+                    target_channels=self._derive_account_target_channels(acc_data, rules),
+                )
+                accounts.append(account)
+
+            for rule in rules:
+                rule.target_channels = []
+
+            block_settings_data = config_data.get("block_settings", {})
+            blocked_keywords = block_settings_data.get("blocked_keywords", [])
+            if isinstance(blocked_keywords, str):
+                blocked_keywords = [blocked_keywords]
+            if not blocked_keywords and legacy_blocked_keywords:
+                blocked_keywords = legacy_blocked_keywords
+
+            blocked_user_ids = block_settings_data.get("blocked_user_ids", [])
+            if isinstance(blocked_user_ids, str):
+                blocked_user_ids = [blocked_user_ids]
+
+            account_tokens = block_settings_data.get("account_tokens", [])
+            if isinstance(account_tokens, str):
+                account_tokens = [account_tokens]
+
+            block_settings = BlockSettings(
+                blocked_keywords=blocked_keywords,
+                blocked_user_ids=blocked_user_ids,
+                account_scope=block_settings_data.get("account_scope", "all"),
+                account_tokens=account_tokens,
+                case_sensitive=block_settings_data.get("case_sensitive", False),
+            )
+
+            return accounts, rules, block_settings
 
         except Exception as e:
             print(f"加载配置失败: {e}")
-            return [], []
+            return [], [], BlockSettings()
 
-    def export_config(self, filepath: str, accounts: List[Account], rules: List[Rule]) -> bool:
+    def export_config(self, filepath: str, accounts: List[Account], rules: List[Rule], block_settings: BlockSettings) -> bool:
         """导出配置到指定文件"""
         try:
             config_data = {
@@ -118,23 +197,29 @@ class ConfigManager:
                     {
                         "token": acc.token,
                         "alias": acc.alias,
-                        "is_active": acc.is_active
+                        "is_active": acc.is_active,
+                        "target_channels": acc.target_channels,
                     }
                     for acc in accounts
                 ],
+                "block_settings": {
+                    "blocked_keywords": block_settings.blocked_keywords,
+                    "blocked_user_ids": block_settings.blocked_user_ids,
+                    "account_scope": block_settings.account_scope,
+                    "account_tokens": block_settings.account_tokens,
+                    "case_sensitive": block_settings.case_sensitive,
+                },
                 "rules": [
                     {
                         "keywords": rule.keywords,
                         "reply": rule.reply,
                         "match_type": rule.match_type.value,
-                        "target_channels": rule.target_channels,
                         "delay_min": rule.delay_min,
                         "delay_max": rule.delay_max,
                         "is_active": rule.is_active,
                         "ignore_replies": getattr(rule, 'ignore_replies', False),
                         "ignore_mentions": getattr(rule, 'ignore_mentions', False),
-                        "case_sensitive": getattr(rule, 'case_sensitive', False),
-                        "exclude_keywords": getattr(rule, 'exclude_keywords', [])
+                        "case_sensitive": getattr(rule, 'case_sensitive', False)
                     }
                     for rule in rules
                 ]
@@ -147,47 +232,80 @@ class ConfigManager:
             print(f"导出配置失败: {e}")
             return False
 
-    def import_config(self, filepath: str) -> tuple[List[Account], List[Rule]]:
+    def import_config(self, filepath: str) -> tuple[List[Account], List[Rule], BlockSettings]:
         """从指定文件导入配置"""
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 config_data = json.load(f)
 
-            accounts = []
-            for acc_data in config_data.get("accounts", []):
-                account = Account(
-                    token=acc_data["token"],
-                    is_active=acc_data.get("is_active", True),
-                    is_valid=acc_data.get("is_valid", False),
-                    last_verified=acc_data.get("last_verified"),
-                    user_info=acc_data.get("user_info"),
-                    rule_ids=acc_data.get("rule_ids", [])
-                )
-                accounts.append(account)
-
+            accounts_data = config_data.get("accounts", [])
             rules = []
+            legacy_blocked_keywords = []
             for rule_data in config_data.get("rules", []):
                 exclude_keywords = rule_data.get("exclude_keywords", [])
                 if isinstance(exclude_keywords, str):
                     exclude_keywords = [exclude_keywords]
+                legacy_blocked_keywords.extend(exclude_keywords)
                 rule = Rule(
                     id=rule_data.get("id", f"rule_{len(rules)}"),  # 如果没有id，生成一个
                     keywords=rule_data["keywords"],
                     reply=rule_data["reply"],
                     match_type=MatchType(rule_data["match_type"]),
-                    target_channels=rule_data["target_channels"],
+                    target_channels=[],
                     delay_min=rule_data.get("delay_min", 2.0),
                     delay_max=rule_data.get("delay_max", 5.0),
                     is_active=rule_data.get("is_active", True),
                     ignore_replies=rule_data.get("ignore_replies", False),
                     ignore_mentions=rule_data.get("ignore_mentions", False),
                     case_sensitive=rule_data.get("case_sensitive", False),
-                    exclude_keywords=exclude_keywords
+                    exclude_keywords=[]
                 )
                 rules.append(rule)
 
-            return accounts, rules
+            for rule, rule_data in zip(rules, config_data.get("rules", [])):
+                rule.target_channels = self._dedupe_int_values(rule_data.get("target_channels", []))
+
+            accounts = []
+            for acc_data in accounts_data:
+                account = Account(
+                    token=acc_data["token"],
+                    is_active=acc_data.get("is_active", True),
+                    is_valid=acc_data.get("is_valid", False),
+                    last_verified=acc_data.get("last_verified"),
+                    user_info=acc_data.get("user_info"),
+                    rule_ids=acc_data.get("rule_ids", []),
+                    target_channels=self._derive_account_target_channels(acc_data, rules),
+                )
+                accounts.append(account)
+
+            for rule in rules:
+                rule.target_channels = []
+
+            block_settings_data = config_data.get("block_settings", {})
+            blocked_keywords = block_settings_data.get("blocked_keywords", [])
+            if isinstance(blocked_keywords, str):
+                blocked_keywords = [blocked_keywords]
+            if not blocked_keywords and legacy_blocked_keywords:
+                blocked_keywords = legacy_blocked_keywords
+
+            blocked_user_ids = block_settings_data.get("blocked_user_ids", [])
+            if isinstance(blocked_user_ids, str):
+                blocked_user_ids = [blocked_user_ids]
+
+            account_tokens = block_settings_data.get("account_tokens", [])
+            if isinstance(account_tokens, str):
+                account_tokens = [account_tokens]
+
+            block_settings = BlockSettings(
+                blocked_keywords=blocked_keywords,
+                blocked_user_ids=blocked_user_ids,
+                account_scope=block_settings_data.get("account_scope", "all"),
+                account_tokens=account_tokens,
+                case_sensitive=block_settings_data.get("case_sensitive", False),
+            )
+
+            return accounts, rules, block_settings
 
         except Exception as e:
             print(f"导入配置失败: {e}")
-            return [], []
+            return [], [], BlockSettings()

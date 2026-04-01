@@ -17,7 +17,7 @@ from PySide6.QtGui import QFont, QIcon, QColor
 # 添加src目录到Python路径（确保打包后能找到模块）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from discord_client import DiscordManager, Account, Rule, MatchType
+from discord_client import DiscordManager, Account, Rule, MatchType, BlockSettings
 from config_manager import ConfigManager
 from gui_helpers import (
     apply_checked_indices,
@@ -28,6 +28,7 @@ from gui_helpers import (
     merge_flag_bits,
     move_item_in_list,
     normalize_reorder_target_row,
+    parse_channel_ids,
     parse_selection_ranges,
     replace_item_preserving_order,
     split_keywords,
@@ -49,7 +50,7 @@ class AccountDialog(QDialog):
     def init_ui(self):
         self.setWindowTitle("添加账号" if not self.account else "编辑账号")
         self.setModal(True)
-        self.resize(500, 250)
+        self.resize(520, 320)
 
         layout = QVBoxLayout(self)
 
@@ -96,6 +97,19 @@ class AccountDialog(QDialog):
         self.active_checkbox = QCheckBox("启用账号")
         self.active_checkbox.setChecked(True if not self.account else self.account.is_active)
         layout.addWidget(self.active_checkbox)
+
+        channels_layout = QVBoxLayout()
+        channels_layout.addWidget(QLabel("频道ID (可选，可多个):"))
+        self.account_channels_input = QLineEdit()
+        self.account_channels_input.setPlaceholderText("为空则监听所有频道，多个频道可用逗号、空格或换行分隔")
+        self.account_channels_input.setToolTip("支持多个频道ID，留空表示全部频道")
+        if self.account:
+            self.account_channels_input.setText(", ".join(map(str, self.account.target_channels)))
+        channels_layout.addWidget(self.account_channels_input)
+        channels_hint = QLabel("支持多个频道ID。留空表示全部频道。")
+        channels_hint.setStyleSheet("color: gray;")
+        channels_layout.addWidget(channels_hint)
+        layout.addLayout(channels_layout)
 
         # 按钮
         buttons_layout = QHBoxLayout()
@@ -270,6 +284,12 @@ class AccountDialog(QDialog):
 
     def accept_and_validate(self):
         """确定并验证"""
+        try:
+            self.parse_target_channels()
+        except ValueError as exc:
+            QMessageBox.warning(self, "频道格式错误", str(exc))
+            return
+
         # 如果还没有验证过，自动验证一次
         if not self.status_label.text() or "未验证" in self.status_label.text():
             self.validate_token()
@@ -286,6 +306,9 @@ class AccountDialog(QDialog):
 
         self.accept()
 
+    def parse_target_channels(self) -> List[int]:
+        return parse_channel_ids(self.account_channels_input.text())
+
     def get_account_data(self):
         """获取账号数据"""
         return {
@@ -294,6 +317,7 @@ class AccountDialog(QDialog):
             'is_valid': self.current_is_valid,
             'user_info': self.current_user_info,
             'last_verified': self.current_last_verified,
+            'target_channels': self.parse_target_channels(),
         }
 
 
@@ -431,10 +455,9 @@ class RuleDialog(QDialog):
         reply_layout.addWidget(self.reply_input)
         layout.addLayout(reply_layout)
 
-        # 匹配类型和频道ID
-        type_channel_layout = QHBoxLayout()
-
         # 匹配类型
+        type_layout_row = QHBoxLayout()
+
         type_layout = QVBoxLayout()
         type_layout.addWidget(QLabel("匹配类型:"))
         self.match_type_combo = QComboBox()
@@ -447,19 +470,10 @@ class RuleDialog(QDialog):
             else:
                 self.match_type_combo.setCurrentIndex(2)
         type_layout.addWidget(self.match_type_combo)
-        type_channel_layout.addLayout(type_layout)
+        type_layout_row.addLayout(type_layout)
+        type_layout_row.addStretch()
 
-        # 目标频道
-        channel_layout = QVBoxLayout()
-        channel_layout.addWidget(QLabel("频道ID (可选):"))
-        self.channels_input = QLineEdit()
-        self.channels_input.setPlaceholderText("为空则监听所有频道")
-        if self.rule:
-            self.channels_input.setText(", ".join(map(str, self.rule.target_channels)))
-        channel_layout.addWidget(self.channels_input)
-        type_channel_layout.addLayout(channel_layout)
-
-        layout.addLayout(type_channel_layout)
+        layout.addLayout(type_layout_row)
 
         # 延迟设置
         delay_layout = QHBoxLayout()
@@ -497,19 +511,9 @@ class RuleDialog(QDialog):
         self.ignore_mentions_checkbox.setChecked(True if not self.rule else getattr(self.rule, 'ignore_mentions', False))
         layout.addWidget(self.ignore_mentions_checkbox)
 
-        # 过滤关键词
-        exclude_layout = QVBoxLayout()
-        exclude_layout.addWidget(QLabel("过滤关键词 (可选):"))
-        self.exclude_keywords_input = QLineEdit()
-        self.exclude_keywords_input.setPlaceholderText("逗号分隔（支持中文逗号），如 http, discord.gg")
-        if self.rule:
-            self.exclude_keywords_input.setText(", ".join(getattr(self.rule, 'exclude_keywords', [])))
-        exclude_layout.addWidget(self.exclude_keywords_input)
-        layout.addLayout(exclude_layout)
-
         # 大小写敏感
         self.case_sensitive_checkbox = QCheckBox("区分大小写")
-        self.case_sensitive_checkbox.setToolTip("启用后，关键词和过滤词匹配将区分大小写")
+        self.case_sensitive_checkbox.setToolTip("启用后，关键词匹配将区分大小写")
         self.case_sensitive_checkbox.setChecked(False if not self.rule else getattr(self.rule, 'case_sensitive', False))
         layout.addWidget(self.case_sensitive_checkbox)
 
@@ -610,28 +614,223 @@ class RuleDialog(QDialog):
             2: "regex"
         }
 
-        # 解析频道ID
-        channels_text = self.channels_input.text().strip()
-        target_channels = []
-        if channels_text:
-            try:
-                target_channels = [int(c.strip()) for c in channels_text.split(",") if c.strip()]
-            except ValueError:
-                pass  # 忽略无效的频道ID
-
         return {
             'keywords': self.get_keywords(),
             'reply': self.reply_input.toPlainText().strip(),
             'match_type': match_type_map[self.match_type_combo.currentIndex()],
-            'target_channels': target_channels,
             'delay_min': self.delay_min_spin.value(),
             'delay_max': self.delay_max_spin.value(),
             'is_active': self.active_checkbox.isChecked(),
             'ignore_replies': self.ignore_replies_checkbox.isChecked(),
             'ignore_mentions': self.ignore_mentions_checkbox.isChecked(),
             'case_sensitive': self.case_sensitive_checkbox.isChecked(),
-            'exclude_keywords': split_keywords(self.exclude_keywords_input.text()),
         }
+
+
+class BlockSettingsDialog(QDialog):
+    """整体屏蔽设置对话框"""
+
+    def __init__(self, parent=None, block_settings=None, accounts=None):
+        super().__init__(parent)
+        self.block_settings = block_settings or BlockSettings()
+        self.accounts = accounts or []
+        self.account_checkboxes = []
+        self.init_ui()
+
+    def init_ui(self):
+        self.setWindowTitle("整体屏蔽设置")
+        self.setModal(True)
+        self.resize(640, 720)
+
+        layout = QVBoxLayout(self)
+
+        scope_layout = QHBoxLayout()
+        scope_layout.addWidget(QLabel("生效账号:"))
+        self.scope_combo = QComboBox()
+        self.scope_combo.addItems(["全部账号", "指定账号"])
+        self.scope_combo.setCurrentIndex(0 if self.block_settings.account_scope == "all" else 1)
+        self.scope_combo.currentIndexChanged.connect(self.update_account_scope_state)
+        scope_layout.addWidget(self.scope_combo)
+        scope_layout.addStretch()
+        layout.addLayout(scope_layout)
+
+        self.case_sensitive_checkbox = QCheckBox("屏蔽关键词区分大小写")
+        self.case_sensitive_checkbox.setChecked(self.block_settings.case_sensitive)
+        layout.addWidget(self.case_sensitive_checkbox)
+
+        keyword_group = QGroupBox("屏蔽关键词")
+        keyword_layout = QVBoxLayout(keyword_group)
+        keyword_hint = QLabel("命中这些词的消息会被直接跳过，支持逗号、分号或换行分隔")
+        keyword_hint.setStyleSheet("color: gray;")
+        keyword_hint.setWordWrap(True)
+        keyword_layout.addWidget(keyword_hint)
+        self.blocked_keywords_input = QTextEdit()
+        self.blocked_keywords_input.setMaximumHeight(110)
+        self.blocked_keywords_input.setPlaceholderText("例如：http\ndiscord.gg\n广告")
+        self.blocked_keywords_input.setPlainText("\n".join(self.block_settings.blocked_keywords))
+        keyword_layout.addWidget(self.blocked_keywords_input)
+        layout.addWidget(keyword_group)
+
+        user_group = QGroupBox("屏蔽用户")
+        user_layout = QVBoxLayout(user_group)
+        user_hint = QLabel("填 Discord 用户 ID，命中这些用户发的消息就不回复")
+        user_hint.setStyleSheet("color: gray;")
+        user_hint.setWordWrap(True)
+        user_layout.addWidget(user_hint)
+        self.blocked_user_ids_input = QTextEdit()
+        self.blocked_user_ids_input.setMaximumHeight(110)
+        self.blocked_user_ids_input.setPlaceholderText("一行一个或逗号分隔，例如：\n123456789012345678")
+        self.blocked_user_ids_input.setPlainText("\n".join(self.block_settings.blocked_user_ids))
+        user_layout.addWidget(self.blocked_user_ids_input)
+        layout.addWidget(user_group)
+
+        account_group = QGroupBox("指定生效账号")
+        account_layout = QVBoxLayout(account_group)
+
+        range_layout = QHBoxLayout()
+        range_layout.addWidget(QLabel("按序号选择:"))
+        self.account_range_input = QLineEdit()
+        self.account_range_input.setPlaceholderText("例如 1-3, 5")
+        self.account_range_input.returnPressed.connect(self.select_account_range)
+        range_layout.addWidget(self.account_range_input)
+
+        select_range_btn = QPushButton("勾选区间")
+        select_range_btn.clicked.connect(self.select_account_range)
+        range_layout.addWidget(select_range_btn)
+
+        clear_range_btn = QPushButton("取消区间")
+        clear_range_btn.clicked.connect(self.clear_account_range)
+        range_layout.addWidget(clear_range_btn)
+        account_layout.addLayout(range_layout)
+
+        scroll_area = QScrollArea()
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+
+        selected_tokens = set(self.block_settings.account_tokens)
+        for index, account in enumerate(self.accounts, start=1):
+            checkbox = QCheckBox(f"{index}. {account.alias}")
+            checkbox.setChecked(account.token in selected_tokens)
+            checkbox.setToolTip(f"Token: {account.token[:12]}...")
+            self.account_checkboxes.append((account.token, checkbox))
+            scroll_layout.addWidget(checkbox)
+
+        if not self.account_checkboxes:
+            empty_label = QLabel("当前还没有账号可选")
+            empty_label.setStyleSheet("color: gray; font-style: italic;")
+            scroll_layout.addWidget(empty_label)
+
+        scroll_layout.addStretch()
+        scroll_area.setWidget(scroll_widget)
+        scroll_area.setWidgetResizable(True)
+        account_layout.addWidget(scroll_area)
+
+        self.account_stats_label = QLabel()
+        account_layout.addWidget(self.account_stats_label)
+
+        account_buttons_layout = QHBoxLayout()
+        select_all_btn = QPushButton("全选")
+        select_all_btn.clicked.connect(self.select_all_accounts)
+        account_buttons_layout.addWidget(select_all_btn)
+
+        clear_all_btn = QPushButton("清空")
+        clear_all_btn.clicked.connect(self.clear_all_accounts)
+        account_buttons_layout.addWidget(clear_all_btn)
+        account_buttons_layout.addStretch()
+        account_layout.addLayout(account_buttons_layout)
+
+        layout.addWidget(account_group)
+        self.account_group = account_group
+
+        for _, checkbox in self.account_checkboxes:
+            checkbox.stateChanged.connect(self.update_account_stats_label)
+
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
+
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        buttons_layout.addWidget(cancel_btn)
+
+        confirm_btn = QPushButton("确定")
+        confirm_btn.clicked.connect(self.accept)
+        confirm_btn.setDefault(True)
+        buttons_layout.addWidget(confirm_btn)
+        layout.addLayout(buttons_layout)
+
+        self.update_account_scope_state()
+        self.update_account_stats_label()
+
+    def update_account_scope_state(self):
+        is_selected_scope = self.scope_combo.currentIndex() == 1
+        self.account_group.setEnabled(is_selected_scope)
+
+    def update_account_stats_label(self):
+        selected_count = sum(1 for _, checkbox in self.account_checkboxes if checkbox.isChecked())
+        total_count = len(self.account_checkboxes)
+        self.account_stats_label.setText(f"已选择 {selected_count}/{total_count} 个账号")
+
+    def select_all_accounts(self):
+        for _, checkbox in self.account_checkboxes:
+            checkbox.setChecked(True)
+
+    def clear_all_accounts(self):
+        for _, checkbox in self.account_checkboxes:
+            checkbox.setChecked(False)
+
+    def select_account_range(self):
+        self.apply_account_range(checked=True)
+
+    def clear_account_range(self):
+        self.apply_account_range(checked=False)
+
+    def apply_account_range(self, checked: bool):
+        if not self.account_checkboxes:
+            QMessageBox.information(self, "提示", "当前没有账号可供选择")
+            return
+
+        selection_text = self.account_range_input.text().strip()
+        if not selection_text:
+            QMessageBox.information(self, "提示", "请输入账号序号范围，例如 1-3, 5")
+            return
+
+        try:
+            row_indices = parse_selection_ranges(selection_text, len(self.account_checkboxes))
+        except ValueError as exc:
+            QMessageBox.warning(self, "范围格式错误", str(exc))
+            return
+
+        current_states = [checkbox.isChecked() for _, checkbox in self.account_checkboxes]
+        updated_states = apply_checked_indices(current_states, row_indices, checked=checked)
+        for state, (_, checkbox) in zip(updated_states, self.account_checkboxes):
+            checkbox.setChecked(state)
+
+        self.update_account_stats_label()
+
+    def get_selected_account_tokens(self) -> List[str]:
+        return [token for token, checkbox in self.account_checkboxes if checkbox.isChecked()]
+
+    def get_block_settings(self) -> BlockSettings:
+        return BlockSettings(
+            blocked_keywords=split_keywords(self.blocked_keywords_input.toPlainText()),
+            blocked_user_ids=split_keywords(self.blocked_user_ids_input.toPlainText()),
+            account_scope="all" if self.scope_combo.currentIndex() == 0 else "selected",
+            account_tokens=self.get_selected_account_tokens(),
+            case_sensitive=self.case_sensitive_checkbox.isChecked(),
+        )
+
+    def accept(self):
+        block_settings = self.get_block_settings()
+        invalid_user_ids = [user_id for user_id in block_settings.blocked_user_ids if not user_id.isdigit()]
+        if invalid_user_ids:
+            QMessageBox.warning(self, "格式错误", f"屏蔽用户ID只能填数字：{', '.join(invalid_user_ids)}")
+            return
+
+        if block_settings.account_scope == "selected" and not block_settings.account_tokens:
+            QMessageBox.warning(self, "缺少账号", "你选择了指定账号生效，但还没有勾选任何账号")
+            return
+
+        super().accept()
 
 
 class RangeSelectableRowsTable(QTableWidget):
@@ -688,6 +887,7 @@ class AccountEditDialog(QDialog):
     validate_token = AccountDialog.validate_token
     show_token_help = AccountDialog.show_token_help
     accept_and_validate = AccountDialog.accept_and_validate
+    parse_target_channels = AccountDialog.parse_target_channels
 
     def __init__(self, parent=None, account=None, rules=None):
         super().__init__(parent)
@@ -735,6 +935,18 @@ class AccountEditDialog(QDialog):
         self.active_checkbox = QCheckBox("启用账号")
         self.active_checkbox.setChecked(self.account.is_active)
         layout.addWidget(self.active_checkbox)
+
+        channels_layout = QVBoxLayout()
+        channels_layout.addWidget(QLabel("频道ID (可选，可多个):"))
+        self.account_channels_input = QLineEdit()
+        self.account_channels_input.setPlaceholderText("为空则监听所有频道，多个频道可用逗号、空格或换行分隔")
+        self.account_channels_input.setToolTip("支持多个频道ID，留空表示全部频道")
+        self.account_channels_input.setText(", ".join(map(str, self.account.target_channels)))
+        channels_layout.addWidget(self.account_channels_input)
+        channels_hint = QLabel("支持多个频道ID。留空表示全部频道。")
+        channels_hint.setStyleSheet("color: gray;")
+        channels_layout.addWidget(channels_hint)
+        layout.addLayout(channels_layout)
 
         rules_title = QLabel(f"配置账号 '{self.account.alias}' 使用的规则：")
         rules_title.setStyleSheet("font-weight: bold; font-size: 12px;")
@@ -867,6 +1079,7 @@ class AccountEditDialog(QDialog):
             'user_info': self.current_user_info,
             'last_verified': self.current_last_verified,
             'selected_rule_ids': self.get_selected_rule_ids(),
+            'target_channels': self.parse_target_channels(),
         }
 
 
@@ -1055,6 +1268,7 @@ class MainWindow(QMainWindow):
         self.config_manager = ConfigManager()
 
         self.worker_thread = None
+        self._updating_accounts_table = False
 
         self.init_ui()
         self.load_config()
@@ -1200,14 +1414,20 @@ class MainWindow(QMainWindow):
 
         # 账号表格
         self.accounts_table = RangeSelectableRowsTable()
-        self.accounts_table.setColumnCount(4)
-        self.accounts_table.setHorizontalHeaderLabels(["用户名", "Token状态", "应用规则", "操作"])
+        self.accounts_table.setColumnCount(5)
+        self.accounts_table.setHorizontalHeaderLabels(["用户名", "Token状态", "应用规则", "频道", "操作"])
         self.accounts_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.accounts_table.setAlternatingRowColors(True)
         self.accounts_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.accounts_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        self.accounts_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked |
+            QAbstractItemView.EditTrigger.EditKeyPressed |
+            QAbstractItemView.EditTrigger.SelectedClicked
+        )
         self.accounts_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.accounts_table.customContextMenuRequested.connect(self.show_accounts_context_menu)
+        self.accounts_table.itemChanged.connect(self.handle_accounts_table_item_changed)
         layout.addWidget(self.accounts_table)
 
         # 统计信息
@@ -1220,6 +1440,20 @@ class MainWindow(QMainWindow):
         """创建规则管理标签页"""
         rules_widget = QWidget()
         layout = QVBoxLayout(rules_widget)
+
+        block_group = QGroupBox("整体屏蔽设置")
+        block_layout = QVBoxLayout(block_group)
+        self.block_settings_summary_label = QLabel()
+        self.block_settings_summary_label.setWordWrap(True)
+        block_layout.addWidget(self.block_settings_summary_label)
+
+        block_controls_layout = QHBoxLayout()
+        edit_block_settings_btn = QPushButton("编辑屏蔽设置")
+        edit_block_settings_btn.clicked.connect(self.edit_block_settings)
+        block_controls_layout.addWidget(edit_block_settings_btn)
+        block_controls_layout.addStretch()
+        block_layout.addLayout(block_controls_layout)
+        layout.addWidget(block_group)
 
         # 标题和添加按钮
         header_layout = QHBoxLayout()
@@ -1241,16 +1475,16 @@ class MainWindow(QMainWindow):
 
         # 规则表格
         self.rules_table = ReorderableRulesTable()
-        self.rules_table.setColumnCount(9)
-        self.rules_table.setHorizontalHeaderLabels(["关键词", "回复内容", "匹配类型", "频道", "延迟", "忽略回复", "忽略@", "过滤关键词", "操作"])
+        self.rules_table.setColumnCount(7)
+        self.rules_table.setHorizontalHeaderLabels(["关键词", "回复内容", "匹配类型", "延迟", "忽略回复", "忽略@", "操作"])
         rules_header = self.rules_table.horizontalHeader()
         rules_header.setStretchLastSection(False)
         rules_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         rules_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for column in range(2, 8):
+        for column in range(2, 6):
             rules_header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
-        rules_header.setSectionResizeMode(8, QHeaderView.ResizeMode.Interactive)
-        self.rules_table.setColumnWidth(8, 220)
+        rules_header.setSectionResizeMode(6, QHeaderView.ResizeMode.Interactive)
+        self.rules_table.setColumnWidth(6, 220)
         self.rules_table.setAlternatingRowColors(True)
         self.rules_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.rules_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
@@ -1387,98 +1621,167 @@ class MainWindow(QMainWindow):
 
     def load_config(self):
         """加载配置"""
-        accounts, rules = self.config_manager.load_config()
+        accounts, rules, block_settings = self.config_manager.load_config()
         self.discord_manager.accounts = accounts
         self.discord_manager.rules = rules
+        self.discord_manager.block_settings = block_settings
 
         # 加载轮换设置（暂时使用默认值，后续可以扩展配置文件）
         # TODO: 从配置文件加载轮换设置
 
+        self.prune_block_settings_account_tokens()
         self.update_accounts_list()
         self.update_rules_list()
         self.update_status()
 
     def save_config(self):
         """保存配置"""
+        self.prune_block_settings_account_tokens()
         self.config_manager.save_config(
             self.discord_manager.accounts,
-            self.discord_manager.rules
+            self.discord_manager.rules,
+            self.discord_manager.block_settings,
         )
 
     def update_accounts_list(self):
         """更新账号表格显示"""
-        self.accounts_table.setRowCount(len(self.discord_manager.accounts))
+        self._updating_accounts_table = True
+        try:
+            self.accounts_table.setRowCount(len(self.discord_manager.accounts))
 
-        for row, account in enumerate(self.discord_manager.accounts):
-            # 用户名
-            username = account.alias  # 使用alias属性，它会自动生成用户名
-            username_item = QTableWidgetItem(username)
-            username_item.setData(Qt.ItemDataRole.UserRole, account.token)  # 使用token作为标识
-            self.accounts_table.setItem(row, 0, username_item)
+            for row, account in enumerate(self.discord_manager.accounts):
+                # 用户名
+                username = account.alias  # 使用alias属性，它会自动生成用户名
+                username_item = QTableWidgetItem(username)
+                username_item.setData(Qt.ItemDataRole.UserRole, account.token)  # 使用token作为标识
+                username_item.setFlags(username_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.accounts_table.setItem(row, 0, username_item)
 
-            # Token状态
-            token_type = account.user_info.get('token_type') if account.user_info and isinstance(account.user_info, dict) else None
-            if account.is_valid:
-                if token_type == 'bot':
-                    token_status = "有效 (Bot)"
-                    bg_color = QColor(144, 238, 144)  # 浅绿色
-                elif token_type == 'user':
-                    token_status = "有效 (用户)"
-                    bg_color = QColor(255, 255, 224)  # 浅黄色 - 警告色
+                # Token状态
+                token_type = account.user_info.get('token_type') if account.user_info and isinstance(account.user_info, dict) else None
+                if account.is_valid:
+                    if token_type == 'bot':
+                        token_status = "有效 (Bot)"
+                        bg_color = QColor(144, 238, 144)  # 浅绿色
+                    elif token_type == 'user':
+                        token_status = "有效 (用户)"
+                        bg_color = QColor(255, 255, 224)  # 浅黄色 - 警告色
+                    else:
+                        token_status = "有效"
+                        bg_color = QColor(144, 238, 144)  # 浅绿色
                 else:
-                    token_status = "有效"
-                    bg_color = QColor(144, 238, 144)  # 浅绿色
-            else:
-                token_status = "无效"
-                bg_color = QColor(255, 182, 193)  # 浅红色
+                    token_status = "无效"
+                    bg_color = QColor(255, 182, 193)  # 浅红色
 
-            token_status_item = QTableWidgetItem(token_status)
-            token_status_item.setBackground(bg_color)
+                token_status_item = QTableWidgetItem(token_status)
+                token_status_item.setBackground(bg_color)
+                token_status_item.setFlags(token_status_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
-            # 添加工具提示
-            if token_type == 'user':
-                token_status_item.setToolTip("用户Token可以验证但无法连接，请使用Bot Token")
-            elif token_type == 'bot':
-                token_status_item.setToolTip("Bot Token，完全支持连接和消息处理")
+                # 添加工具提示
+                if token_type == 'user':
+                    token_status_item.setToolTip("用户Token可以验证但无法连接，请使用Bot Token")
+                elif token_type == 'bot':
+                    token_status_item.setToolTip("Bot Token，完全支持连接和消息处理")
 
-            self.accounts_table.setItem(row, 1, token_status_item)
+                self.accounts_table.setItem(row, 1, token_status_item)
 
-            # 应用规则（显示关联的规则数量）
-            applied_rules = len(account.rule_ids)
-            total_rules = len(self.discord_manager.rules)
-            rules_text = f"{applied_rules}/{total_rules}"
-            rules_item = QTableWidgetItem(rules_text)
-            if applied_rules > 0:
-                rules_item.setBackground(QColor(173, 216, 230))  # 浅蓝色
-            else:
-                rules_item.setBackground(QColor(240, 240, 240))  # 浅灰色
-            rules_item.setData(Qt.ItemDataRole.UserRole, account.rule_ids)  # 存储规则ID列表
-            self.accounts_table.setItem(row, 2, rules_item)
+                # 应用规则（显示关联的规则数量）
+                applied_rules = len(account.rule_ids)
+                total_rules = len(self.discord_manager.rules)
+                rules_text = f"{applied_rules}/{total_rules}"
+                rules_item = QTableWidgetItem(rules_text)
+                rules_item.setFlags(rules_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if applied_rules > 0:
+                    rules_item.setBackground(QColor(173, 216, 230))  # 浅蓝色
+                else:
+                    rules_item.setBackground(QColor(240, 240, 240))  # 浅灰色
+                rules_item.setData(Qt.ItemDataRole.UserRole, account.rule_ids)  # 存储规则ID列表
+                self.accounts_table.setItem(row, 2, rules_item)
 
-            # 操作按钮
-            edit_btn = QPushButton("编辑")
-            edit_btn.clicked.connect(lambda checked, token=account.token: self.edit_account_by_token(token))
+                # 频道范围
+                channel_text = self.format_account_channels(account.target_channels)
+                channel_item = QTableWidgetItem(channel_text)
+                channel_item.setToolTip("双击可直接编辑。留空或输入“全部”表示所有频道。")
+                self.accounts_table.setItem(row, 3, channel_item)
 
-            validate_btn = QPushButton("验证")
-            validate_btn.clicked.connect(lambda checked, token=account.token: self.revalidate_account_by_token(token))
+                # 操作按钮
+                edit_btn = QPushButton("编辑")
+                edit_btn.clicked.connect(lambda checked, token=account.token: self.edit_account_by_token(token))
 
-            delete_btn = QPushButton("删除")
-            delete_btn.clicked.connect(lambda checked, token=account.token: self.remove_account_by_token(token))
+                validate_btn = QPushButton("验证")
+                validate_btn.clicked.connect(lambda checked, token=account.token: self.revalidate_account_by_token(token))
 
-            # 创建按钮容器
-            button_widget = QWidget()
-            button_layout = QHBoxLayout(button_widget)
-            button_layout.setContentsMargins(2, 2, 2, 2)
-            button_layout.addWidget(edit_btn)
-            button_layout.addWidget(validate_btn)
-            button_layout.addWidget(delete_btn)
+                delete_btn = QPushButton("删除")
+                delete_btn.clicked.connect(lambda checked, token=account.token: self.remove_account_by_token(token))
 
-            self.accounts_table.setCellWidget(row, 3, button_widget)
+                # 创建按钮容器
+                button_widget = QWidget()
+                button_layout = QHBoxLayout(button_widget)
+                button_layout.setContentsMargins(2, 2, 2, 2)
+                button_layout.addWidget(edit_btn)
+                button_layout.addWidget(validate_btn)
+                button_layout.addWidget(delete_btn)
+
+                self.accounts_table.setCellWidget(row, 4, button_widget)
+        finally:
+            self._updating_accounts_table = False
 
         # 更新统计信息
         total_accounts = len(self.discord_manager.accounts)
         active_accounts = len([acc for acc in self.discord_manager.accounts if acc.is_active])
         self.accounts_stats_label.setText(f"总账号数: {total_accounts} | 启用账号数: {active_accounts}")
+        self.update_block_settings_summary()
+
+    @staticmethod
+    def format_account_channels(channel_ids: List[int]) -> str:
+        if not channel_ids:
+            return "全部"
+        return ", ".join(map(str, channel_ids))
+
+    def handle_accounts_table_item_changed(self, item):
+        if self._updating_accounts_table or item is None:
+            return
+
+        if item.column() != 3:
+            return
+
+        token_item = self.accounts_table.item(item.row(), 0)
+        if token_item is None:
+            return
+
+        account_token = token_item.data(Qt.ItemDataRole.UserRole)
+        account = next((acc for acc in self.discord_manager.accounts if acc.token == account_token), None)
+        if account is None:
+            return
+
+        raw_text = item.text().strip()
+        normalized_text = raw_text.lower()
+
+        try:
+            if not raw_text or normalized_text in {"全部", "all", "*"}:
+                parsed_channels = []
+            else:
+                parsed_channels = parse_channel_ids(raw_text)
+        except ValueError as exc:
+            self._updating_accounts_table = True
+            try:
+                item.setText(self.format_account_channels(account.target_channels))
+            finally:
+                self._updating_accounts_table = False
+            QMessageBox.warning(self, "频道格式错误", str(exc))
+            return
+
+        account.target_channels = parsed_channels
+        self.save_config()
+
+        self._updating_accounts_table = True
+        try:
+            item.setText(self.format_account_channels(account.target_channels))
+            item.setToolTip("双击可直接编辑。留空或输入“全部”表示所有频道。")
+        finally:
+            self._updating_accounts_table = False
+
+        self.add_log(f"账号 '{account.alias}' 的频道设置已更新", "success")
 
     def update_rules_list(self):
         """更新规则表格显示"""
@@ -1509,43 +1812,22 @@ class MainWindow(QMainWindow):
             match_item = QTableWidgetItem(match_type_name)
             self.rules_table.setItem(row, 2, match_item)
 
-            # 频道信息
-            channels_info = f"{len(rule.target_channels)}个频道" if rule.target_channels else "全部频道"
-            channels_display = ", ".join(map(str, rule.target_channels[:2]))
-            if len(rule.target_channels) > 2:
-                channels_display += "..."
-            channels_item = QTableWidgetItem(channels_display if rule.target_channels else "全部")
-            channels_item.setToolTip(", ".join(map(str, rule.target_channels)) if rule.target_channels else "监听所有频道")
-            self.rules_table.setItem(row, 3, channels_item)
-
             # 延迟
             delay_info = f"{rule.delay_min:.1f}-{rule.delay_max:.1f}秒"
             delay_item = QTableWidgetItem(delay_info)
-            self.rules_table.setItem(row, 4, delay_item)
+            self.rules_table.setItem(row, 3, delay_item)
 
             # 忽略回复
             ignore_replies_status = "是" if getattr(rule, 'ignore_replies', False) else "否"
             ignore_item = QTableWidgetItem(ignore_replies_status)
             ignore_item.setData(Qt.ItemDataRole.ToolTipRole, "是否忽略回复他人的消息")
-            self.rules_table.setItem(row, 5, ignore_item)
+            self.rules_table.setItem(row, 4, ignore_item)
 
             # 忽略@
             ignore_mentions_status = "是" if getattr(rule, 'ignore_mentions', False) else "否"
             mentions_item = QTableWidgetItem(ignore_mentions_status)
             mentions_item.setData(Qt.ItemDataRole.ToolTipRole, "是否忽略包含@他人的消息")
-            self.rules_table.setItem(row, 6, mentions_item)
-
-            # 过滤关键词
-            exclude_keywords = getattr(rule, 'exclude_keywords', [])
-            if exclude_keywords:
-                exclude_display = ", ".join(exclude_keywords[:2])
-                if len(exclude_keywords) > 2:
-                    exclude_display += "..."
-            else:
-                exclude_display = "无"
-            exclude_item = QTableWidgetItem(exclude_display)
-            exclude_item.setToolTip(", ".join(exclude_keywords) if exclude_keywords else "无过滤关键词")
-            self.rules_table.setItem(row, 7, exclude_item)
+            self.rules_table.setItem(row, 5, mentions_item)
 
             # 操作按钮
             move_up_btn = QPushButton("↑")
@@ -1580,7 +1862,7 @@ class MainWindow(QMainWindow):
             button_layout.addWidget(edit_btn)
             button_layout.addWidget(delete_btn)
 
-            self.rules_table.setCellWidget(row, 8, button_widget)
+            self.rules_table.setCellWidget(row, 6, button_widget)
 
         # 更新统计信息
         total_rules = len(self.discord_manager.rules)
@@ -1589,6 +1871,78 @@ class MainWindow(QMainWindow):
 
         # 应用当前搜索过滤
         self.filter_rules()
+        self.update_block_settings_summary()
+
+    def prune_block_settings_account_tokens(self):
+        valid_tokens = {account.token for account in self.discord_manager.accounts}
+        current_tokens = getattr(self.discord_manager.block_settings, "account_tokens", [])
+        self.discord_manager.block_settings.account_tokens = [
+            token for token in current_tokens if token in valid_tokens
+        ]
+
+    def sync_block_settings_account_token(self, old_token: str, new_token: str):
+        current_tokens = list(getattr(self.discord_manager.block_settings, "account_tokens", []))
+        if old_token not in current_tokens:
+            return
+
+        updated_tokens = []
+        for token in current_tokens:
+            updated_token = new_token if token == old_token else token
+            if updated_token not in updated_tokens:
+                updated_tokens.append(updated_token)
+        self.discord_manager.block_settings.account_tokens = updated_tokens
+
+    def update_block_settings_summary(self):
+        if not hasattr(self, "block_settings_summary_label"):
+            return
+
+        block_settings = self.discord_manager.block_settings
+        keyword_count = len(block_settings.blocked_keywords)
+        user_count = len(block_settings.blocked_user_ids)
+
+        if block_settings.account_scope == "all":
+            scope_text = "全部账号"
+        else:
+            selected_accounts = [
+                account.alias
+                for account in self.discord_manager.accounts
+                if account.token in block_settings.account_tokens
+            ]
+            if selected_accounts:
+                if len(selected_accounts) <= 3:
+                    scope_text = "指定账号：" + "、".join(selected_accounts)
+                else:
+                    scope_text = f"指定账号：{len(selected_accounts)} 个"
+            else:
+                scope_text = "指定账号：0 个"
+
+        summary_parts = [
+            f"屏蔽关键词 {keyword_count} 项",
+            f"屏蔽用户ID {user_count} 个",
+            f"生效范围 {scope_text}",
+        ]
+
+        if block_settings.case_sensitive:
+            summary_parts.append("关键词大小写敏感已开启")
+
+        if keyword_count == 0 and user_count == 0:
+            summary_parts.insert(0, "当前还没有设置任何整体屏蔽条件")
+
+        self.block_settings_summary_label.setText(" | ".join(summary_parts))
+
+    def edit_block_settings(self):
+        dialog = BlockSettingsDialog(
+            self,
+            block_settings=self.discord_manager.block_settings,
+            accounts=self.discord_manager.accounts,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self.discord_manager.block_settings = dialog.get_block_settings()
+        self.save_config()
+        self.update_block_settings_summary()
+        QMessageBox.information(self, "成功", "整体屏蔽设置已更新")
 
     def move_rule_by_step(self, source_row: int, step: int):
         total_rules = len(self.discord_manager.rules)
@@ -1825,6 +2179,7 @@ class MainWindow(QMainWindow):
                         for acc in self.discord_manager.accounts:
                             if acc.token == data['token']:
                                 acc.is_active = data['is_active']
+                                acc.target_channels = data.get('target_channels', [])
                                 break
                     return success, message
 
@@ -1878,6 +2233,7 @@ class MainWindow(QMainWindow):
                 last_verified=data.get('last_verified'),
                 user_info=data.get('user_info'),
                 rule_ids=data.get('selected_rule_ids', list(account.rule_ids)),
+                target_channels=data.get('target_channels', list(account.target_channels)),
                 last_sent_time=account.last_sent_time if new_token == account.token else None,
                 rate_limit_until=account.rate_limit_until if new_token == account.token else None,
             )
@@ -1887,6 +2243,7 @@ class MainWindow(QMainWindow):
                 account_index,
                 replacement_account,
             )
+            self.sync_block_settings_account_token(account.token, new_token)
 
             self.add_log(f"账号位置 {account_index + 1} 编辑成功，顺序保持不变", "success")
             self.update_accounts_list()
@@ -2022,12 +2379,18 @@ class MainWindow(QMainWindow):
 
         if reply == QMessageBox.StandardButton.Yes:
             self.discord_manager.remove_account(token)
+            self.prune_block_settings_account_tokens()
             self.add_log(f"账号 '{account.alias}' 已删除", "info")
             self.update_accounts_list()
             self.save_config()
 
     def remove_account_by_alias(self, alias):
         """通过别名删除账号"""
+        account = next((acc for acc in self.discord_manager.accounts if acc.alias == alias), None)
+        if not account:
+            QMessageBox.warning(self, "错误", "账号不存在")
+            return
+
         reply = QMessageBox.question(
             self, "确认删除",
             f"确定要删除账号 '{alias}' 吗？",
@@ -2035,7 +2398,8 @@ class MainWindow(QMainWindow):
         )
 
         if reply == QMessageBox.StandardButton.Yes:
-            self.discord_manager.remove_account(alias)
+            self.discord_manager.remove_account(account.token)
+            self.prune_block_settings_account_tokens()
             self.update_accounts_list()
             self.save_config()
 
@@ -2064,6 +2428,7 @@ class MainWindow(QMainWindow):
                     # 账号可能已经被删除，跳过
                     continue
 
+            self.prune_block_settings_account_tokens()
             self.update_accounts_list()
             self.save_config()
             self.add_log(f"成功删除 {deleted_count} 个账号", "success")
@@ -2083,13 +2448,11 @@ class MainWindow(QMainWindow):
                 data['keywords'],
                 data['reply'],
                 MatchType(data['match_type']),
-                data['target_channels'],
                 data['delay_min'],
                 data['delay_max'],
                 data.get('ignore_replies', False),
                 data.get('ignore_mentions', False),
                 data.get('case_sensitive', False),
-                data.get('exclude_keywords', [])
             )
 
             # 设置激活状态
@@ -2121,14 +2484,12 @@ class MainWindow(QMainWindow):
                 keywords=data['keywords'],
                 reply=data['reply'],
                 match_type=MatchType(data['match_type']),
-                target_channels=data['target_channels'],
                 delay_min=data['delay_min'],
                 delay_max=data['delay_max'],
                 is_active=data['is_active'],
                 ignore_replies=data.get('ignore_replies', False),
                 ignore_mentions=data.get('ignore_mentions', False),
                 case_sensitive=data.get('case_sensitive', False),
-                exclude_keywords=data.get('exclude_keywords', [])
             )
 
             self.update_rules_list()
@@ -2341,7 +2702,10 @@ class MainWindow(QMainWindow):
         )
         if filename:
             if self.config_manager.export_config(
-                filename, self.discord_manager.accounts, self.discord_manager.rules
+                filename,
+                self.discord_manager.accounts,
+                self.discord_manager.rules,
+                self.discord_manager.block_settings,
             ):
                 QMessageBox.information(self, "成功", "配置导出成功")
             else:
@@ -2353,10 +2717,12 @@ class MainWindow(QMainWindow):
             self, "导入配置", "", "JSON 文件 (*.json)"
         )
         if filename:
-            accounts, rules = self.config_manager.import_config(filename)
-            if accounts or rules:
+            accounts, rules, block_settings = self.config_manager.import_config(filename)
+            if accounts or rules or block_settings.blocked_keywords or block_settings.blocked_user_ids:
                 self.discord_manager.accounts = accounts
                 self.discord_manager.rules = rules
+                self.discord_manager.block_settings = block_settings
+                self.prune_block_settings_account_tokens()
                 self.update_accounts_list()
                 self.update_rules_list()
                 self.save_config()
