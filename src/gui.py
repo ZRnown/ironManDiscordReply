@@ -934,7 +934,8 @@ class RangeSelectableRowsTable(QTableWidget):
             model_index = self.model().index(row_index, 0)
             selection_model.select(model_index, flags)
 
-        self.setCurrentCell(row_indices[-1], 0)
+        self.anchor_row = row_indices[0]
+        self.setCurrentCell(row_indices[-1], 0, QItemSelectionModel.SelectionFlag.NoUpdate)
 
     def _row_from_event(self, event) -> int:
         position = event.position().toPoint() if hasattr(event, "position") else event.pos()
@@ -1547,6 +1548,37 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(add_rule_btn)
 
         layout.addLayout(header_layout)
+
+        batch_layout = QHBoxLayout()
+        batch_layout.addWidget(QLabel("批量选择:"))
+        self.rule_range_input = QLineEdit()
+        self.rule_range_input.setPlaceholderText("例如 1-20, 35, 40-45")
+        self.rule_range_input.setToolTip("按当前列表序号批量选择规则；如果正在搜索，则按筛选后的可见顺序计算")
+        self.rule_range_input.returnPressed.connect(self.select_rules_by_range)
+        self.rule_range_input.setMaximumWidth(260)
+        batch_layout.addWidget(self.rule_range_input)
+
+        select_rule_range_btn = QPushButton("选择区间")
+        select_rule_range_btn.clicked.connect(self.select_rules_by_range)
+        batch_layout.addWidget(select_rule_range_btn)
+
+        select_all_rules_btn = QPushButton("全选")
+        select_all_rules_btn.clicked.connect(self.select_all_rules)
+        batch_layout.addWidget(select_all_rules_btn)
+
+        clear_rule_selection_btn = QPushButton("清空选择")
+        clear_rule_selection_btn.clicked.connect(self.clear_rule_selection)
+        batch_layout.addWidget(clear_rule_selection_btn)
+
+        delete_selected_rules_btn = QPushButton("删除选中")
+        delete_selected_rules_btn.clicked.connect(self.remove_selected_rules)
+        batch_layout.addWidget(delete_selected_rules_btn)
+
+        batch_layout.addStretch()
+        batch_hint = QLabel("支持 Ctrl/Cmd/Shift 多选")
+        batch_hint.setStyleSheet("color: gray;")
+        batch_layout.addWidget(batch_hint)
+        layout.addLayout(batch_layout)
 
         # 规则表格
         self.rules_table = ReorderableRulesTable()
@@ -2252,6 +2284,68 @@ class MainWindow(QMainWindow):
         elif len(selected_rows) > 1:
             if action == delete_multiple_action:
                 self.remove_multiple_rules(list(selected_rows))
+
+    def get_visible_rule_row_indices(self) -> List[int]:
+        return [
+            row_index
+            for row_index in range(self.rules_table.rowCount())
+            if not self.rules_table.isRowHidden(row_index)
+        ]
+
+    def clear_rule_selection(self):
+        self.rules_table.clearSelection()
+
+    def select_all_rules(self):
+        visible_row_indices = self.get_visible_rule_row_indices()
+        if not visible_row_indices:
+            QMessageBox.information(self, "提示", "当前没有可供选择的规则")
+            return
+
+        self.rules_table.select_rows_by_indices(visible_row_indices)
+
+        first_item = self.rules_table.item(visible_row_indices[0], 0)
+        if first_item:
+            self.rules_table.scrollToItem(first_item, QAbstractItemView.ScrollHint.PositionAtTop)
+
+        self.add_log(f"已选择 {len(visible_row_indices)} 条规则", "info")
+
+    def select_rules_by_range(self):
+        visible_row_indices = self.get_visible_rule_row_indices()
+        if not visible_row_indices:
+            QMessageBox.information(self, "提示", "当前没有规则可供选择")
+            return
+
+        selection_text = self.rule_range_input.text().strip()
+        if not selection_text:
+            QMessageBox.information(self, "提示", "请输入要选择的序号范围，例如 1-20, 35, 40-45")
+            return
+
+        try:
+            visible_selection_indices = parse_selection_ranges(selection_text, len(visible_row_indices))
+        except ValueError as exc:
+            QMessageBox.warning(self, "范围格式错误", str(exc))
+            return
+
+        if not visible_selection_indices:
+            QMessageBox.information(self, "提示", "没有匹配到可选择的规则序号")
+            return
+
+        target_row_indices = [visible_row_indices[index] for index in visible_selection_indices]
+        self.rules_table.select_rows_by_indices(target_row_indices)
+
+        first_item = self.rules_table.item(target_row_indices[0], 0)
+        if first_item:
+            self.rules_table.scrollToItem(first_item, QAbstractItemView.ScrollHint.PositionAtTop)
+
+        self.add_log(f"已按序号选择 {len(target_row_indices)} 条规则", "info")
+
+    def remove_selected_rules(self):
+        selected_rows = sorted({model_index.row() for model_index in self.rules_table.selectionModel().selectedRows()})
+        if not selected_rows:
+            QMessageBox.information(self, "提示", "请先选中要删除的规则")
+            return
+
+        self.remove_multiple_rules(selected_rows)
 
     def add_account(self):
         """添加新账号"""

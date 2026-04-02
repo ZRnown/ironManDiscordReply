@@ -10,7 +10,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional GUI dependency in tes
     QApplication = None
     QAbstractItemView = None
 
-from src.discord_client import Account
+from src.discord_client import Account, MatchType, Rule
 if QApplication is not None:
     from src.gui import MainWindow, RuleDialog
 
@@ -110,3 +110,47 @@ class MainWindowAccountCooldownTests(GuiTestCase):
             self.window.update_status()
 
         self.assertEqual(self.window.accounts_table.item(0, 4).text(), "可用")
+
+
+class MainWindowRuleSelectionTests(GuiTestCase):
+    def setUp(self):
+        with patch.object(MainWindow, "load_config", autospec=True):
+            self.window = MainWindow()
+        self.window.discord_manager.rules = [
+            Rule(
+                id=f"rule-{index}",
+                keywords=[f"keyword-{index}"],
+                reply=f"reply-{index}",
+                match_type=MatchType.PARTIAL,
+                target_channels=[],
+            )
+            for index in range(1, 4)
+        ]
+        self.window.update_rules_list()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+
+    def test_select_all_rules_selects_every_visible_row(self):
+        self.window.select_all_rules()
+
+        selected_rows = [
+            model_index.row()
+            for model_index in self.window.rules_table.selectionModel().selectedRows()
+        ]
+
+        self.assertEqual(selected_rows, [0, 1, 2])
+
+    def test_select_rules_by_range_uses_filtered_visible_order(self):
+        self.window.rule_search_input.setText("keyword-2")
+        self.window.rule_range_input.setText("1")
+
+        self.window.select_rules_by_range()
+
+        selected_rows = [
+            model_index.row()
+            for model_index in self.window.rules_table.selectionModel().selectedRows()
+        ]
+
+        self.assertEqual(selected_rows, [1])
