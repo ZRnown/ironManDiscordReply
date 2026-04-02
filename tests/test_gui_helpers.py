@@ -9,6 +9,7 @@ from src.gui_helpers import (
     build_row_selection_range,
     can_move_adjacent_row,
     ensure_flag_bits,
+    format_remaining_duration,
     find_item_index_by_id,
     get_adjacent_row_index,
     merge_flag_bits,
@@ -17,6 +18,7 @@ from src.gui_helpers import (
     parse_channel_ids,
     parse_rule_import_file,
     parse_selection_ranges,
+    remove_items_by_indices,
     replace_item_preserving_order,
     split_keywords,
 )
@@ -123,6 +125,26 @@ class ReplaceItemPreservingOrderTests(unittest.TestCase):
 
         self.assertEqual(replaced, ["acc-1", "acc-new", "acc-3"])
         self.assertEqual(original, ["acc-1", "acc-2", "acc-3"])
+
+
+class RemoveItemsByIndicesTests(unittest.TestCase):
+    def test_removes_multiple_selected_items_and_preserves_order(self):
+        original = ["k1", "k2", "k3", "k4", "k5"]
+
+        remaining = remove_items_by_indices(original, [1, 3])
+
+        self.assertEqual(remaining, ["k1", "k3", "k5"])
+        self.assertEqual(original, ["k1", "k2", "k3", "k4", "k5"])
+
+
+class FormatRemainingDurationTests(unittest.TestCase):
+    def test_returns_available_when_deadline_missing_or_expired(self):
+        self.assertEqual(format_remaining_duration(None, current_time=100.0, active_label="冷却"), "可用")
+        self.assertEqual(format_remaining_duration(99.0, current_time=100.0, active_label="冷却"), "可用")
+
+    def test_formats_seconds_and_minutes(self):
+        self.assertEqual(format_remaining_duration(105.0, current_time=100.0, active_label="冷却"), "冷却 5秒")
+        self.assertEqual(format_remaining_duration(185.0, current_time=100.0, active_label="冷却"), "冷却 1分25秒")
 
 
 @dataclass

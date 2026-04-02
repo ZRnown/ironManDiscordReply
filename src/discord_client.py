@@ -152,6 +152,26 @@ class BlockSettings:
         return self.ignore_mentions and bool(mentions)
 
 
+def _get_message_author_label(message) -> str:
+    author = getattr(message, "author", None)
+    if author is None:
+        return "未知用户"
+
+    for attribute in ("display_name", "global_name", "name"):
+        value = getattr(author, attribute, None)
+        if value:
+            return str(value)
+
+    author_id = getattr(author, "id", None)
+    if author_id is not None:
+        return str(author_id)
+    return "未知用户"
+
+
+def _build_reply_log_message(account_alias: str, message) -> str:
+    return f"{account_alias} 回复了 {_get_message_author_label(message)}"
+
+
 class AutoReplyClient(discord.Client):
     def __init__(self, account: Account, rules: List[Rule], log_callback=None, discord_manager=None, *args, **kwargs):
         # 修正: discord.py-self 不需要也不支持 intents 参数
@@ -218,9 +238,6 @@ class AutoReplyClient(discord.Client):
         except:
             pass  # 如果无法检查，跳过
 
-        if self._is_blocked_message(message):
-            return
-
         if not self.account.allows_channel(getattr(message.channel, "id", None)):
             return
 
@@ -235,22 +252,11 @@ class AutoReplyClient(discord.Client):
                 continue
 
             if self._check_match(message.content, rule):
-                match_msg = f"[{self.account.alias}] 🎯 匹配到关键词 | 消息: '{message.content}' | 来自: {message.author.name} | 频道: #{message.channel.name}"
-                reply_msg = f"[{self.account.alias}] 🤖 准备回复: '{rule.reply}'"
-
-                print(match_msg)
-                print(reply_msg)
-                if self.log_callback:
-                    self.log_callback(match_msg)
-                    self.log_callback(reply_msg)
+                if self._is_blocked_message(message):
+                    break
 
                 try:
                     delay = random.uniform(rule.delay_min, rule.delay_max)
-                    delay_msg = f"[{self.account.alias}] ⏱️  等待 {delay:.1f} 秒..."
-                    print(delay_msg)
-                    if self.log_callback:
-                        self.log_callback(delay_msg)
-
                     try:
                         async with message.channel.typing():
                             await asyncio.sleep(delay)
@@ -262,25 +268,15 @@ class AutoReplyClient(discord.Client):
                         self.discord_manager.rotation_enabled and
                         self.account.allows_channel(getattr(message.channel, "id", None))):
                         # 使用轮换模式
-                        success = await self.discord_manager.send_rotated_reply(
+                        await self.discord_manager.send_rotated_reply(
                             message,
                             rule.reply,
                             rule.keywords[0] if rule.keywords else "",
                         )
-                        if success:
-                            success_msg = f"[{self.account.alias}] ✅ 轮换回复成功"
-                            print(success_msg)
-                            if self.log_callback:
-                                self.log_callback(success_msg)
-                        else:
-                            error_msg = f"[{self.account.alias}] ❌ 轮换回复失败"
-                            print(error_msg)
-                            if self.log_callback:
-                                self.log_callback(error_msg)
                     else:
                         # 使用普通回复
                         await message.reply(rule.reply)
-                        success_msg = f"[{self.account.alias}] ✅ 回复成功"
+                        success_msg = _build_reply_log_message(self.account.alias, message)
                         print(success_msg)
                         if self.log_callback:
                             self.log_callback(success_msg)
@@ -288,7 +284,7 @@ class AutoReplyClient(discord.Client):
                     break # 只处理第一个匹配规则
 
                 except Exception as e:
-                    error_msg = f"[{self.account.alias}] ❌ 回复失败: {e}"
+                    error_msg = f"{self.account.alias} 回复失败: {e}"
                     print(error_msg)
                     if self.log_callback:
                         self.log_callback(error_msg)
@@ -352,25 +348,7 @@ class AutoReplyClient(discord.Client):
 
         author_id = getattr(message.author, "id", None)
         content = getattr(message, "content", "") or ""
-
-        if not block_settings.applies_to_account(self.account):
-            return False
-
-        if block_settings.blocks_user(author_id):
-            block_msg = f"[{self.account.alias}] 🚫 命中屏蔽用户ID: {author_id}"
-            print(block_msg)
-            if self.log_callback:
-                self.log_callback(block_msg)
-            return True
-
-        if block_settings.blocks_content(content):
-            block_msg = f"[{self.account.alias}] 🚫 命中屏蔽关键词 | 消息: '{content}'"
-            print(block_msg)
-            if self.log_callback:
-                self.log_callback(block_msg)
-            return True
-
-        return False
+        return block_settings.should_block_message(self.account, content, author_id)
 
     async def start_client(self):
         self.is_running = False
@@ -891,8 +869,7 @@ class DiscordManager:
                 self.current_rotation_index = (account_index + 1) % len(available_accounts)
 
                 if self.log_callback:
-                    cooldown_text = f"，进入 {self.rotation_interval} 秒冷却" if self.rotation_interval > 0 else ""
-                    self.log_callback(f"✅ [{account.alias}] 轮换回复成功{cooldown_text}: '{reply_text[:50]}...'")
+                    self.log_callback(_build_reply_log_message(account.alias, message))
 
                 return True
 
@@ -938,6 +915,7 @@ class DiscordManager:
 
     def get_status(self) -> Dict:
         """获取当前状态"""
+        current_time = time.time()
         return {
             "is_running": self.is_running,
             "accounts": [
@@ -945,7 +923,9 @@ class DiscordManager:
                     "token": acc.token,
                     "alias": acc.alias,  # 现在是只读属性
                     "is_active": acc.is_active,
-                    "is_running": any(c.account.token == acc.token and c.is_running for c in self.clients)
+                    "is_running": any(c.account.token == acc.token and c.is_running for c in self.clients),
+                    "cooldown_until": acc.cooldown_until,
+                    "cooldown_remaining_seconds": max(0, int((acc.cooldown_until or 0) - current_time)),
                 }
                 for acc in self.accounts
             ],

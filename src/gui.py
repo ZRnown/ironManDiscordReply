@@ -24,6 +24,7 @@ from gui_helpers import (
     build_row_selection_range,
     can_move_adjacent_row,
     find_item_index_by_id,
+    format_remaining_duration,
     get_adjacent_row_index,
     merge_flag_bits,
     move_item_in_list,
@@ -31,6 +32,7 @@ from gui_helpers import (
     parse_channel_ids,
     parse_rule_import_file,
     parse_selection_ranges,
+    remove_items_by_indices,
     replace_item_preserving_order,
     split_keywords,
 )
@@ -398,7 +400,7 @@ class RuleDialog(QDialog):
         keywords_header = QHBoxLayout()
         keywords_header.addWidget(QLabel("关键词:"))
         keywords_header.addStretch()
-        keywords_hint = QLabel("选中后可用上下按钮调整顺序，双击可直接编辑")
+        keywords_hint = QLabel("支持 Ctrl/Cmd/Shift 多选，双击可直接编辑；单选时可用上下按钮调整顺序")
         keywords_hint.setStyleSheet("color: gray;")
         keywords_header.addWidget(keywords_hint)
         keywords_layout.addLayout(keywords_header)
@@ -415,6 +417,7 @@ class RuleDialog(QDialog):
         keywords_layout.addLayout(keyword_input_layout)
 
         self.keywords_list = ReorderableKeywordList()
+        self.keywords_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.keywords_list.setDragEnabled(False)
         self.keywords_list.setAcceptDrops(False)
         self.keywords_list.viewport().setAcceptDrops(False)
@@ -434,6 +437,10 @@ class RuleDialog(QDialog):
         move_down_keyword_btn = QPushButton("下移")
         move_down_keyword_btn.clicked.connect(self.move_selected_keyword_down)
         keyword_actions_layout.addWidget(move_down_keyword_btn)
+
+        select_all_keyword_btn = QPushButton("全选")
+        select_all_keyword_btn.clicked.connect(self.select_all_keywords)
+        keyword_actions_layout.addWidget(select_all_keyword_btn)
 
         keyword_actions_layout.addStretch()
         remove_keyword_btn = QPushButton("删除选中")
@@ -543,10 +550,33 @@ class RuleDialog(QDialog):
         self.keyword_input.clear()
         self.keywords_list.setCurrentRow(self.keywords_list.count() - 1)
 
+    def select_all_keywords(self):
+        if self.keywords_list.count() <= 0:
+            return
+        self.keywords_list.selectAll()
+
     def remove_selected_keyword(self):
-        current_row = self.keywords_list.currentRow()
-        if current_row >= 0:
-            self.keywords_list.takeItem(current_row)
+        selected_rows = sorted({index.row() for index in self.keywords_list.selectedIndexes()})
+        if not selected_rows:
+            current_row = self.keywords_list.currentRow()
+            if current_row >= 0:
+                selected_rows = [current_row]
+
+        if not selected_rows:
+            return
+
+        keyword_texts = [
+            self.keywords_list.item(index).text()
+            for index in range(self.keywords_list.count())
+        ]
+        remaining_keywords = remove_items_by_indices(keyword_texts, selected_rows)
+        next_row = min(selected_rows[0], len(remaining_keywords) - 1) if remaining_keywords else -1
+
+        self.keywords_list.clear()
+        self.add_keywords(remaining_keywords)
+
+        if next_row >= 0:
+            self.keywords_list.setCurrentRow(next_row)
 
     def move_selected_keyword_up(self):
         self.move_selected_keyword(-1)
@@ -636,7 +666,10 @@ class BlockSettingsDialog(QDialog):
 
         match_group = QGroupBox("通用匹配设置")
         match_layout = QVBoxLayout(match_group)
-        match_hint = QLabel("这些设置会统一作用到所有规则，也会影响关键词屏蔽的匹配方式。")
+        match_hint = QLabel(
+            "这些设置会统一作用到所有规则，也会影响关键词屏蔽的匹配方式。"
+            "屏蔽只会跟着账号当前会回复的频道生效；如果账号监听的是全部频道，这里也会覆盖全部频道。"
+        )
         match_hint.setStyleSheet("color: gray;")
         match_hint.setWordWrap(True)
         match_layout.addWidget(match_hint)
@@ -663,7 +696,7 @@ class BlockSettingsDialog(QDialog):
 
         keyword_group = QGroupBox("屏蔽关键词")
         keyword_layout = QVBoxLayout(keyword_group)
-        keyword_hint = QLabel("命中这些词的消息会被直接跳过，支持逗号、分号或换行分隔")
+        keyword_hint = QLabel("命中这些词的消息会被直接跳过，支持逗号、分号或换行分隔。频道范围跟随账号的回复频道设置。")
         keyword_hint.setStyleSheet("color: gray;")
         keyword_hint.setWordWrap(True)
         keyword_layout.addWidget(keyword_hint)
@@ -1445,9 +1478,16 @@ class MainWindow(QMainWindow):
 
         # 账号表格
         self.accounts_table = RangeSelectableRowsTable()
-        self.accounts_table.setColumnCount(5)
-        self.accounts_table.setHorizontalHeaderLabels(["用户名", "Token状态", "应用规则", "频道", "操作"])
-        self.accounts_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.accounts_table.setColumnCount(6)
+        self.accounts_table.setHorizontalHeaderLabels(["用户名", "Token状态", "应用规则", "频道", "冷却", "操作"])
+        accounts_header = self.accounts_table.horizontalHeader()
+        accounts_header.setStretchLastSection(False)
+        accounts_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        accounts_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        accounts_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        accounts_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        accounts_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        accounts_header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.accounts_table.setAlternatingRowColors(True)
         self.accounts_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.accounts_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
@@ -1740,6 +1780,10 @@ class MainWindow(QMainWindow):
                 channel_item.setToolTip("双击可直接编辑。留空或输入“全部”表示所有频道。")
                 self.accounts_table.setItem(row, 3, channel_item)
 
+                # 冷却状态
+                cooldown_item = self.build_account_cooldown_item(account.cooldown_until)
+                self.accounts_table.setItem(row, 4, cooldown_item)
+
                 # 操作按钮
                 edit_btn = QPushButton("编辑")
                 edit_btn.clicked.connect(lambda checked, token=account.token: self.edit_account_by_token(token))
@@ -1758,7 +1802,7 @@ class MainWindow(QMainWindow):
                 button_layout.addWidget(validate_btn)
                 button_layout.addWidget(delete_btn)
 
-                self.accounts_table.setCellWidget(row, 4, button_widget)
+                self.accounts_table.setCellWidget(row, 5, button_widget)
         finally:
             self._updating_accounts_table = False
 
@@ -1773,6 +1817,34 @@ class MainWindow(QMainWindow):
         if not channel_ids:
             return "全部"
         return ", ".join(map(str, channel_ids))
+
+    @staticmethod
+    def build_account_cooldown_item(cooldown_until: Optional[float]) -> QTableWidgetItem:
+        cooldown_text = format_remaining_duration(cooldown_until, current_time=time.time())
+        cooldown_item = QTableWidgetItem(cooldown_text)
+        cooldown_item.setFlags(cooldown_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        if cooldown_text == "可用":
+            cooldown_item.setBackground(QColor(226, 239, 218))
+        else:
+            cooldown_item.setBackground(QColor(255, 242, 204))
+        return cooldown_item
+
+    def update_account_cooldown_cells(self, status_accounts: Optional[List[dict]] = None):
+        if not hasattr(self, "accounts_table"):
+            return
+
+        status_by_token = {
+            account_status["token"]: account_status
+            for account_status in (status_accounts or [])
+        }
+
+        for row, account in enumerate(self.discord_manager.accounts):
+            cooldown_until = account.cooldown_until
+            if account.token in status_by_token:
+                cooldown_until = status_by_token[account.token].get("cooldown_until")
+
+            cooldown_item = self.build_account_cooldown_item(cooldown_until)
+            self.accounts_table.setItem(row, 4, cooldown_item)
 
     def handle_accounts_table_item_changed(self, item):
         if self._updating_accounts_table or item is None:
@@ -2036,6 +2108,7 @@ class MainWindow(QMainWindow):
         """更新状态显示"""
         try:
             status = self.discord_manager.get_status()
+            self.update_account_cooldown_cells(status["accounts"])
 
             # 更新账号表格
             account_count = len(status["accounts"])
@@ -2749,9 +2822,8 @@ class MainWindow(QMainWindow):
         # 保存配置
         self.save_config()
 
-        if self.log_callback:
-            status = "启用" if enabled else "禁用"
-            self.log_callback(f"账号轮换模式已{status}")
+        status = "启用" if enabled else "禁用"
+        self.add_log(f"账号轮换模式已{status}", "info")
 
     def on_rotation_interval_changed(self, value):
         """轮换冷却时间改变时立即生效"""
@@ -2759,8 +2831,7 @@ class MainWindow(QMainWindow):
         if self.rotation_enabled_checkbox.isChecked():
             self.rotation_status_label.setText(f"轮换模式: 已启用 (冷却{value}秒)")
             self.save_config()
-            if self.log_callback:
-                self.log_callback(f"账号轮换冷却时间已更新为 {value} 秒")
+            self.add_log(f"账号轮换冷却时间已更新为 {value} 秒", "info")
 
     def on_error(self, error_msg):
         """错误处理"""

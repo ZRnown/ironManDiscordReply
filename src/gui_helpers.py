@@ -123,6 +123,29 @@ def parse_selection_ranges(text: str, total_count: int) -> List[int]:
     return sorted(indices)
 
 
+def remove_items_by_indices(items: Sequence[T], indices: Sequence[int]) -> List[T]:
+    removal_indices = {index for index in indices if 0 <= index < len(items)}
+    return [item for index, item in enumerate(items) if index not in removal_indices]
+
+
+def format_remaining_duration(until_timestamp: float | None, current_time: float | None = None, active_label: str = "冷却") -> str:
+    if until_timestamp is None:
+        return "可用"
+
+    if current_time is None:
+        import time
+        current_time = time.time()
+
+    remaining_seconds = max(0, int(until_timestamp - current_time))
+    if remaining_seconds <= 0:
+        return "可用"
+
+    minutes, seconds = divmod(remaining_seconds, 60)
+    if minutes <= 0:
+        return f"{active_label} {seconds}秒"
+    return f"{active_label} {minutes}分{seconds}秒"
+
+
 def _load_csv_rows(filepath: str) -> List[List[str]]:
     rows = []
     with open(filepath, "r", encoding="utf-8-sig", newline="") as handle:

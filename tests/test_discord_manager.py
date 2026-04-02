@@ -79,10 +79,11 @@ class FakeRotationClient:
 
 
 class FakeMessage:
-    def __init__(self, channel_id=123, guild_id=456, message_id=789):
+    def __init__(self, channel_id=123, guild_id=456, message_id=789, author_id=321, author_name="Alice"):
         self.id = message_id
         self.channel = SimpleNamespace(id=channel_id, name="general")
         self.guild = SimpleNamespace(id=guild_id)
+        self.author = SimpleNamespace(id=author_id, name=author_name)
         self.reply_calls = []
         self.reference_calls = []
 
@@ -275,6 +276,43 @@ class DiscordManagerStartupTests(unittest.IsolatedAsyncioTestCase):
         total_sent = len(sender_one.sent_messages) + len(sender_two.sent_messages)
         self.assertEqual(total_sent, 1)
         self.assertIn(3001, self.manager.replied_messages)
+
+    async def test_send_rotated_reply_logs_only_sender_and_target(self):
+        self.manager.rotation_enabled = True
+        self.manager.accounts = [
+            Account(
+                token="token-1",
+                is_active=True,
+                is_valid=True,
+                user_info={"name": "sender", "discriminator": "0001"},
+            ),
+        ]
+        sender = FakeMessageSender()
+        self.manager.clients = [
+            FakeRotationClient(self.manager.accounts[0], sender=sender),
+        ]
+        logs = []
+        self.manager.log_callback = logs.append
+
+        success = await self.manager.send_rotated_reply(
+            FakeMessage(message_id=4001, author_name="Bob"),
+            "hello Bob",
+        )
+
+        self.assertTrue(success)
+        self.assertEqual(logs, ["sender#0001 回复了 Bob"])
+
+    def test_get_status_reports_cooldown_remaining_seconds(self):
+        self.manager.accounts = [
+            Account(token="token-1", is_active=True, is_valid=True, cooldown_until=108.0),
+            Account(token="token-2", is_active=True, is_valid=True, cooldown_until=95.0),
+        ]
+
+        with patch("src.discord_client.time.time", return_value=100.0):
+            status = self.manager.get_status()
+
+        self.assertEqual(status["accounts"][0]["cooldown_remaining_seconds"], 8)
+        self.assertEqual(status["accounts"][1]["cooldown_remaining_seconds"], 0)
 
 
 if __name__ == "__main__":
