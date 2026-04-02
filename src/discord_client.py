@@ -26,9 +26,12 @@ class Account:
     user_info: Optional[Dict] = None  # 用户信息
     rule_ids: List[str] = None  # 关联的规则ID列表
     target_channels: List[int] = None  # 账号生效频道列表，空表示全部频道
+    delay_min: float = 0.0  # 兼容旧配置，当前固定为最快回复
+    delay_max: float = 0.0  # 兼容旧配置，当前固定为最快回复
     last_sent_time: Optional[float] = None  # 最后发送消息时间
     cooldown_until: Optional[float] = None  # 轮换冷却到期时间
     rate_limit_until: Optional[float] = None  # 频率限制到期时间
+    reply_count: int = 0  # 当前账号累计回复数量
 
     def __post_init__(self):
         if self.rule_ids is None:
@@ -37,6 +40,8 @@ class Account:
             self.target_channels = []
         else:
             self.target_channels = self._normalize_channel_ids(self.target_channels)
+        self.delay_min, self.delay_max = 0.0, 0.0
+        self.reply_count = max(0, int(self.reply_count or 0))
 
     @property
     def alias(self) -> str:
@@ -63,6 +68,24 @@ class Account:
 
         return normalized_ids
 
+    @staticmethod
+    def _normalize_delay_range(delay_min: Optional[float], delay_max: Optional[float]) -> tuple[float, float]:
+        try:
+            normalized_min = float(delay_min)
+        except (TypeError, ValueError):
+            normalized_min = 0.1
+
+        try:
+            normalized_max = float(delay_max)
+        except (TypeError, ValueError):
+            normalized_max = 1.0
+
+        normalized_min = max(0.0, normalized_min)
+        normalized_max = max(0.0, normalized_max)
+        if normalized_max < normalized_min:
+            normalized_min, normalized_max = normalized_max, normalized_min
+        return normalized_min, normalized_max
+
     def allows_channel(self, channel_id: Optional[int]) -> bool:
         if not self.target_channels:
             return True
@@ -78,19 +101,30 @@ class Rule:
     reply: str
     match_type: MatchType
     target_channels: List[int]
-    delay_min: float = 0.1
-    delay_max: float = 1.0
+    delay_min: float = 0.0
+    delay_max: float = 0.0
     is_active: bool = True
     ignore_replies: bool = True  # 是否忽略回复他人的消息
     ignore_mentions: bool = True  # 是否忽略包含@他人的消息
     case_sensitive: bool = False  # 是否区分大小写，False表示不区分大小写
     exclude_keywords: List[str] = field(default_factory=list)  # 触发后不回复的过滤关键词
+    reply_account_count: int = 1  # 命中后由几个账号回复，支持 1-3
+
+    def __post_init__(self):
+        self.target_channels = Account._normalize_channel_ids(self.target_channels)
+        self.delay_min, self.delay_max = 0.0, 0.0
+        try:
+            normalized_count = int(self.reply_account_count)
+        except (TypeError, ValueError):
+            normalized_count = 1
+        self.reply_account_count = max(1, min(3, normalized_count))
 
 
 @dataclass
 class BlockSettings:
     blocked_keywords: List[str] = field(default_factory=list)
     blocked_user_ids: List[str] = field(default_factory=list)
+    blocked_channel_ids: List[int] = field(default_factory=list)
     account_scope: str = "all"  # all | selected
     account_tokens: List[str] = field(default_factory=list)
     ignore_replies: bool = True
@@ -100,6 +134,7 @@ class BlockSettings:
     def __post_init__(self):
         self.blocked_keywords = self._normalize_values(self.blocked_keywords)
         self.blocked_user_ids = self._normalize_values(self.blocked_user_ids)
+        self.blocked_channel_ids = Account._normalize_channel_ids(self.blocked_channel_ids)
         self.account_tokens = self._normalize_values(self.account_tokens)
         if self.account_scope not in {"all", "selected"}:
             self.account_scope = "all"
@@ -138,8 +173,23 @@ class BlockSettings:
             return False
         return str(author_id).strip() in self.blocked_user_ids
 
-    def should_block_message(self, account: Account, content: str, author_id: Optional[str]) -> bool:
+    def applies_to_channel(self, channel_id: Optional[int]) -> bool:
+        if not self.blocked_channel_ids:
+            return True
+        if channel_id is None:
+            return False
+        return int(channel_id) in self.blocked_channel_ids
+
+    def should_block_message(
+        self,
+        account: Account,
+        content: str,
+        author_id: Optional[str],
+        channel_id: Optional[int] = None,
+    ) -> bool:
         if not self.applies_to_account(account):
+            return False
+        if not self.applies_to_channel(channel_id):
             return False
         if self.blocks_user(author_id):
             return True
@@ -185,6 +235,8 @@ class AutoReplyClient(discord.Client):
         self.discord_manager = discord_manager
         self.startup_complete = asyncio.Event()
         self.startup_error: Optional[str] = None
+        if self.discord_manager is not None and getattr(self.discord_manager, "log_callback", None) is None and log_callback is not None:
+            self.discord_manager.log_callback = log_callback
 
     async def on_ready(self):
         try:
@@ -256,13 +308,6 @@ class AutoReplyClient(discord.Client):
                     break
 
                 try:
-                    delay = random.uniform(rule.delay_min, rule.delay_max)
-                    try:
-                        async with message.channel.typing():
-                            await asyncio.sleep(delay)
-                    except Exception:
-                        await asyncio.sleep(delay)
-
                     # 检查是否启用轮换模式
                     if (self.discord_manager and
                         self.discord_manager.rotation_enabled and
@@ -272,6 +317,13 @@ class AutoReplyClient(discord.Client):
                             message,
                             rule.reply,
                             rule.keywords[0] if rule.keywords else "",
+                        )
+                    elif self.discord_manager:
+                        await self.discord_manager.send_rule_replies(
+                            message,
+                            rule,
+                            preferred_account=self.account,
+                            preferred_client=self,
                         )
                     else:
                         # 使用普通回复
@@ -348,7 +400,8 @@ class AutoReplyClient(discord.Client):
 
         author_id = getattr(message.author, "id", None)
         content = getattr(message, "content", "") or ""
-        return block_settings.should_block_message(self.account, content, author_id)
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
+        return block_settings.should_block_message(self.account, content, author_id, channel_id=channel_id)
 
     async def start_client(self):
         self.is_running = False
@@ -579,11 +632,23 @@ class DiscordManager:
         self.replied_messages: Set[int] = set()
         self.max_replied_messages: int = 1000  # 最多跟踪1000条消息
         self.rotation_lock: Optional[asyncio.Lock] = None
+        self.reply_locks: Dict[Tuple[int, str], asyncio.Lock] = {}
+        self.rule_reply_accounts: Dict[Tuple[int, str], Set[str]] = {}
+        self.rule_reply_order: List[Tuple[int, str]] = []
+        self.max_rule_reply_records: int = 2000
+        self.recent_replies: List[Dict] = []
+        self.max_recent_replies: int = 200
 
-    def _get_available_accounts(self, channel_id: Optional[int] = None) -> List[Account]:
+    def _rule_matches_account(self, account: Account, rule: Rule) -> bool:
+        return not account.rule_ids or rule.id in account.rule_ids
+
+    def _get_available_accounts(self, channel_id: Optional[int] = None, rule: Optional[Rule] = None) -> List[Account]:
         return [
             acc for acc in self.accounts
-            if acc.is_active and acc.is_valid and acc.allows_channel(channel_id)
+            if acc.is_active
+            and acc.is_valid
+            and acc.allows_channel(channel_id)
+            and (rule is None or self._rule_matches_account(acc, rule))
         ]
 
     @staticmethod
@@ -623,6 +688,177 @@ class DiscordManager:
         for msg_id in sorted_messages[:remove_count]:
             self.replied_messages.remove(msg_id)
 
+    def _trim_rule_reply_records(self):
+        if len(self.rule_reply_order) <= self.max_rule_reply_records:
+            return
+
+        remove_count = len(self.rule_reply_order) // 2
+        expired_keys = self.rule_reply_order[:remove_count]
+        self.rule_reply_order = self.rule_reply_order[remove_count:]
+        for reply_key in expired_keys:
+            self.rule_reply_accounts.pop(reply_key, None)
+            self.reply_locks.pop(reply_key, None)
+
+    @staticmethod
+    def _build_message_link(message) -> str:
+        jump_url = getattr(message, "jump_url", None)
+        if jump_url:
+            return str(jump_url)
+
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
+        message_id = getattr(message, "id", None)
+        guild_id = getattr(getattr(message, "guild", None), "id", None)
+        if channel_id is None or message_id is None:
+            return ""
+
+        guild_segment = str(guild_id) if guild_id is not None else "@me"
+        return f"https://discord.com/channels/{guild_segment}/{channel_id}/{message_id}"
+
+    def _remember_rule_reply(self, reply_key: Tuple[int, str], account_token: str):
+        if reply_key not in self.rule_reply_accounts:
+            self.rule_reply_accounts[reply_key] = set()
+            self.rule_reply_order.append(reply_key)
+            self._trim_rule_reply_records()
+
+        self.rule_reply_accounts[reply_key].add(account_token)
+
+    def _record_reply(self, account: Account, message, keyword: str):
+        account.reply_count = max(0, int(getattr(account, "reply_count", 0))) + 1
+        account.last_sent_time = time.time()
+
+        self.recent_replies.append({
+            "timestamp": account.last_sent_time,
+            "time_text": time.strftime("%H:%M:%S", time.localtime(account.last_sent_time)),
+            "account_alias": account.alias,
+            "keyword": keyword,
+            "target": _get_message_author_label(message),
+            "link": self._build_message_link(message),
+        })
+        if len(self.recent_replies) > self.max_recent_replies:
+            self.recent_replies = self.recent_replies[-self.max_recent_replies:]
+
+        if self.log_callback:
+            self.log_callback(_build_reply_log_message(account.alias, message))
+
+    async def _send_reply_with_account(
+        self,
+        account: Account,
+        message,
+        reply_text: str,
+        *,
+        client=None,
+        use_message_reply: bool = False,
+    ) -> bool:
+        current_time = time.time()
+        if not self._can_account_send_now(account, current_time):
+            return False
+
+        try:
+            if use_message_reply:
+                await message.reply(reply_text)
+                return True
+
+            client = client or self._find_client_for_account(account)
+            if client is None:
+                return False
+
+            channel_id = getattr(getattr(message, "channel", None), "id", None)
+            guild_id = getattr(getattr(message, "guild", None), "id", None)
+            if channel_id is None:
+                return False
+
+            target_channel = client.get_partial_messageable(channel_id, guild_id=guild_id)
+            send_kwargs = {"mention_author": False}
+            message_reference = self._build_message_reference(message)
+            if message_reference is not None:
+                send_kwargs["reference"] = message_reference
+            await target_channel.send(reply_text, **send_kwargs)
+            return True
+
+        except discord.HTTPException as e:
+            if e.code == 20016:  # 慢速模式
+                account.rate_limit_until = current_time + 600
+                if self.log_callback:
+                    self.log_callback(f"[{account.alias}] 触发慢速模式，当前账号暂时跳过")
+                return False
+            if self.log_callback:
+                self.log_callback(f"[{account.alias}] 发送失败: HTTP {e.code}")
+            return False
+        except Exception as e:
+            if self.log_callback:
+                self.log_callback(f"[{account.alias}] 发送异常: {str(e)}")
+            return False
+
+    async def send_rule_replies(
+        self,
+        message,
+        rule: Rule,
+        *,
+        preferred_account: Optional[Account] = None,
+        preferred_client=None,
+    ) -> int:
+        reply_key = (getattr(message, "id", 0), rule.id)
+        reply_lock = self.reply_locks.setdefault(reply_key, asyncio.Lock())
+
+        async with reply_lock:
+            already_replied_tokens = set(self.rule_reply_accounts.get(reply_key, set()))
+            target_reply_count = max(1, min(3, int(getattr(rule, "reply_account_count", 1) or 1)))
+
+            if len(already_replied_tokens) >= target_reply_count:
+                return 0
+
+            channel_id = getattr(getattr(message, "channel", None), "id", None)
+            candidate_accounts = self._get_available_accounts(channel_id, rule)
+            if not candidate_accounts:
+                return 0
+
+            ordered_accounts: List[Account] = []
+            if preferred_account is not None:
+                ordered_accounts.extend(
+                    account for account in candidate_accounts
+                    if account.token == preferred_account.token
+                )
+            ordered_accounts.extend(
+                account for account in candidate_accounts
+                if preferred_account is None or account.token != preferred_account.token
+            )
+
+            success_count = 0
+            primary_token = preferred_account.token if preferred_account is not None else None
+
+            for account in ordered_accounts:
+                if account.token in already_replied_tokens:
+                    continue
+
+                use_message_reply = account.token == primary_token
+                if use_message_reply:
+                    send_success = await self._send_reply_with_account(
+                        account,
+                        message,
+                        rule.reply,
+                        client=preferred_client,
+                        use_message_reply=True,
+                    )
+                else:
+                    send_success = await self._send_reply_with_account(
+                        account,
+                        message,
+                        rule.reply,
+                    )
+
+                if not send_success:
+                    continue
+
+                self._remember_rule_reply(reply_key, account.token)
+                already_replied_tokens.add(account.token)
+                self._record_reply(account, message, rule.keywords[0] if rule.keywords else "")
+                success_count += 1
+
+                if len(already_replied_tokens) >= target_reply_count:
+                    break
+
+            return success_count
+
     async def add_account_async(self, token: str) -> Tuple[bool, Optional[str]]:
         if any(acc.token == token for acc in self.accounts):
             return False, "Token已存在"
@@ -651,7 +887,8 @@ class DiscordManager:
     def add_rule(self, keywords: List[str], reply: str, match_type: MatchType,
                  delay_min: float = 0.1, delay_max: float = 1.0,
                  ignore_replies: bool = True, ignore_mentions: bool = True,
-                 case_sensitive: bool = False, exclude_keywords: Optional[List[str]] = None):
+                 case_sensitive: bool = False, exclude_keywords: Optional[List[str]] = None,
+                 reply_account_count: int = 1):
         """添加规则"""
         # 生成唯一的规则ID
         import time
@@ -668,7 +905,8 @@ class DiscordManager:
             ignore_replies=ignore_replies,
             ignore_mentions=ignore_mentions,
             case_sensitive=case_sensitive,
-            exclude_keywords=exclude_keywords or []
+            exclude_keywords=exclude_keywords or [],
+            reply_account_count=reply_account_count,
         )
         self.rules.append(rule)
 
@@ -863,13 +1101,11 @@ class DiscordManager:
                 self.replied_messages.add(message.id)
                 self._trim_replied_messages()
 
-                account.last_sent_time = current_time
                 if self.rotation_interval > 0:
                     account.cooldown_until = current_time + self.rotation_interval
                 self.current_rotation_index = (account_index + 1) % len(available_accounts)
 
-                if self.log_callback:
-                    self.log_callback(_build_reply_log_message(account.alias, message))
+                self._record_reply(account, message, rule_name)
 
                 return True
 
@@ -924,11 +1160,13 @@ class DiscordManager:
                     "alias": acc.alias,  # 现在是只读属性
                     "is_active": acc.is_active,
                     "is_running": any(c.account.token == acc.token and c.is_running for c in self.clients),
+                    "reply_count": acc.reply_count,
                     "cooldown_until": acc.cooldown_until,
                     "cooldown_remaining_seconds": max(0, int((acc.cooldown_until or 0) - current_time)),
                 }
                 for acc in self.accounts
             ],
             "rules_count": len(self.rules),
-            "active_rules": len([r for r in self.rules if r.is_active])
+            "active_rules": len([r for r in self.rules if r.is_active]),
+            "recent_replies": list(reversed(self.recent_replies[-20:])),
         }

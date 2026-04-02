@@ -57,11 +57,13 @@ class ConfigManagerBlockSettingsTests(unittest.TestCase):
                     reply="hello",
                     match_type=MatchType.PARTIAL,
                     target_channels=[],
+                    reply_account_count=3,
                 )
             ]
             block_settings = BlockSettings(
                 blocked_keywords=["http"],
                 blocked_user_ids=["1001"],
+                blocked_channel_ids=[123456],
                 account_scope="selected",
                 account_tokens=["token-1"],
                 ignore_replies=False,
@@ -76,13 +78,26 @@ class ConfigManagerBlockSettingsTests(unittest.TestCase):
             self.assertEqual([account.token for account in loaded_accounts], ["token-1"])
             self.assertEqual(loaded_accounts[0].target_channels, [123456])
             self.assertEqual([rule.id for rule in loaded_rules], ["rule-1"])
+            self.assertEqual(loaded_rules[0].reply_account_count, 3)
             self.assertEqual(loaded_block_settings.blocked_keywords, ["http"])
             self.assertEqual(loaded_block_settings.blocked_user_ids, ["1001"])
+            self.assertEqual(loaded_block_settings.blocked_channel_ids, [123456])
             self.assertEqual(loaded_block_settings.account_scope, "selected")
             self.assertEqual(loaded_block_settings.account_tokens, ["token-1"])
             self.assertFalse(loaded_block_settings.ignore_replies)
             self.assertFalse(loaded_block_settings.ignore_mentions)
             self.assertTrue(loaded_block_settings.case_sensitive)
+
+    def test_channel_scoped_block_only_applies_to_selected_channels(self):
+        settings = BlockSettings(
+            blocked_keywords=["spam"],
+            blocked_channel_ids=[123],
+            account_scope="all",
+        )
+        account = Account(token="token-1")
+
+        self.assertTrue(settings.should_block_message(account, content="spam here", author_id="1", channel_id=123))
+        self.assertFalse(settings.should_block_message(account, content="spam here", author_id="1", channel_id=456))
 
     def test_migrates_legacy_rule_exclude_keywords_into_block_settings(self):
         with tempfile.TemporaryDirectory() as temp_dir:

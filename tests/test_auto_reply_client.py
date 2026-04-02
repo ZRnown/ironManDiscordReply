@@ -24,9 +24,29 @@ class FakeInboundChannel:
     def __init__(self, channel_id=123, name="general"):
         self.id = channel_id
         self.name = name
+        self.typing_call_count = 0
 
     def typing(self):
+        self.typing_call_count += 1
         return FakeTypingContext()
+
+
+class FakeOutboundChannel:
+    def __init__(self):
+        self.send_calls = []
+
+    async def send(self, content=None, **kwargs):
+        self.send_calls.append({"content": content, "kwargs": kwargs})
+        return object()
+
+
+class FakeSecondaryClient:
+    def __init__(self, account):
+        self.account = account
+        self.channel = FakeOutboundChannel()
+
+    def get_partial_messageable(self, channel_id, guild_id=None):
+        return self.channel
 
 
 class FakeInboundMessage:
@@ -71,6 +91,7 @@ class AutoReplyClientMessageTests(unittest.IsolatedAsyncioTestCase):
             target_channels=[],
         )
         self.manager = DiscordManager()
+        self.manager.accounts = [self.account]
         self.manager.block_settings = BlockSettings()
         self.client = AutoReplyClient(
             self.account,
@@ -137,6 +158,51 @@ class AutoReplyClientMessageTests(unittest.IsolatedAsyncioTestCase):
             await self.client.on_message(message)
 
         self.assertEqual(message.reply_calls, [])
+
+    async def test_replies_immediately_without_sleep_or_typing(self):
+        message = FakeInboundMessage(content="hello there", author_name="Alice")
+
+        sleep_mock = AsyncMock()
+        with patch("src.discord_client.asyncio.sleep", new=sleep_mock):
+            await self.client.on_message(message)
+
+        sleep_mock.assert_not_awaited()
+        self.assertEqual(message.channel.typing_call_count, 0)
+
+    async def test_reply_updates_reply_count_and_recent_history(self):
+        message = FakeInboundMessage(content="hello there", author_name="Alice", channel_id=123, message_id=1001)
+
+        with patch("src.discord_client.asyncio.sleep", new=AsyncMock()):
+            await self.client.on_message(message)
+
+        status = self.manager.get_status()
+        self.assertEqual(status["accounts"][0]["reply_count"], 1)
+        self.assertEqual(len(status["recent_replies"]), 1)
+        self.assertEqual(status["recent_replies"][0]["account_alias"], "sender#0001")
+        self.assertEqual(status["recent_replies"][0]["keyword"], "hello")
+        self.assertEqual(status["recent_replies"][0]["target"], "Alice")
+        self.assertEqual(status["recent_replies"][0]["link"], "https://discord.com/channels/456/123/1001")
+
+    async def test_rule_can_request_two_accounts_to_reply(self):
+        secondary_account = Account(
+            token="token-2",
+            is_active=True,
+            is_valid=True,
+            user_info={"name": "backup", "discriminator": "0002"},
+        )
+        secondary_client = FakeSecondaryClient(secondary_account)
+        self.manager.accounts = [self.account, secondary_account]
+        self.manager.clients = [self.client, secondary_client]
+        self.rule.reply_account_count = 2
+
+        message = FakeInboundMessage(content="hello there", author_name="Alice", channel_id=123, message_id=1002)
+
+        with patch("src.discord_client.asyncio.sleep", new=AsyncMock()):
+            await self.client.on_message(message)
+
+        self.assertEqual(len(message.reply_calls), 1)
+        self.assertEqual(len(secondary_client.channel.send_calls), 1)
+        self.assertEqual(secondary_client.channel.send_calls[0]["content"], "hi there")
 
 
 if __name__ == "__main__":

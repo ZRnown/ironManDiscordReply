@@ -10,6 +10,9 @@ except ModuleNotFoundError:  # pragma: no cover - optional GUI dependency in tes
     QApplication = None
     QAbstractItemView = None
 
+from pathlib import Path
+import tempfile
+
 from src.discord_client import Account, MatchType, Rule
 if QApplication is not None:
     from src.gui import MainWindow, RuleDialog
@@ -57,6 +60,19 @@ class RuleDialogKeywordSelectionTests(GuiTestCase):
 
         self.assertEqual(self.dialog.get_keywords(), ["beta", "delta"])
 
+    def test_clear_all_keywords_removes_every_keyword(self):
+        self.dialog = RuleDialog()
+        self.dialog.add_keywords(["alpha", "beta"])
+
+        self.dialog.clear_all_keywords()
+
+        self.assertEqual(self.dialog.get_keywords(), [])
+
+    def test_reply_account_count_defaults_to_one(self):
+        self.dialog = RuleDialog()
+
+        self.assertEqual(self.dialog.get_rule_data()["reply_account_count"], 1)
+
 
 class MainWindowAccountCooldownTests(GuiTestCase):
     def setUp(self):
@@ -86,6 +102,7 @@ class MainWindowAccountCooldownTests(GuiTestCase):
             for index in range(self.window.accounts_table.columnCount())
         ]
 
+        self.assertIn("冷却", headers)
         self.assertIn("冷却", headers)
         self.assertEqual(self.window.accounts_table.item(0, 4).text(), "冷却 8秒")
 
@@ -154,3 +171,17 @@ class MainWindowRuleSelectionTests(GuiTestCase):
         ]
 
         self.assertEqual(selected_rows, [1])
+
+    def test_rules_table_reply_count_column_shows_one_account(self):
+        self.assertEqual(self.window.rules_table.item(0, 3).text(), "1个账号")
+
+    def test_export_rules_to_csv_writes_table_headers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "rules.csv"
+            with patch("src.gui.QFileDialog.getSaveFileName", return_value=(str(output_path), "CSV 文件 (*.csv)")), patch(
+                "src.gui.QMessageBox.information"
+            ):
+                self.window.export_rules_table()
+
+            content = output_path.read_text(encoding="utf-8-sig")
+            self.assertIn("序号,关键词,回复内容,匹配类型,回复账号数,是否启用", content)

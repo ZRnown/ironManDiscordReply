@@ -1,12 +1,14 @@
 import sys
 import asyncio
+import csv
+import html
 import os
 import time
 from typing import List, Optional
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QListWidget, QListWidgetItem, QPushButton, QLabel,
-    QLineEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox,
+    QLineEdit, QTextEdit, QComboBox, QSpinBox,
     QCheckBox, QGroupBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QMessageBox, QFileDialog, QSplitter, QProgressBar,
     QDialog, QMenu, QScrollArea, QAbstractItemView
@@ -53,7 +55,7 @@ class AccountDialog(QDialog):
     def init_ui(self):
         self.setWindowTitle("添加账号" if not self.account else "编辑账号")
         self.setModal(True)
-        self.resize(520, 320)
+        self.resize(560, 380)
 
         layout = QVBoxLayout(self)
 
@@ -113,6 +115,10 @@ class AccountDialog(QDialog):
         channels_hint.setStyleSheet("color: gray;")
         channels_layout.addWidget(channels_hint)
         layout.addLayout(channels_layout)
+
+        speed_hint = QLabel("回复速度已固定为 0 秒，命中后立即回复。")
+        speed_hint.setStyleSheet("color: gray;")
+        layout.addWidget(speed_hint)
 
         # 按钮
         buttons_layout = QHBoxLayout()
@@ -312,6 +318,9 @@ class AccountDialog(QDialog):
     def parse_target_channels(self) -> List[int]:
         return parse_channel_ids(self.account_channels_input.text())
 
+    def parse_reply_delay_range(self) -> tuple[float, float]:
+        return 0.0, 0.0
+
     def get_account_data(self):
         """获取账号数据"""
         return {
@@ -321,6 +330,8 @@ class AccountDialog(QDialog):
             'user_info': self.current_user_info,
             'last_verified': self.current_last_verified,
             'target_channels': self.parse_target_channels(),
+            'delay_min': 0.0,
+            'delay_max': 0.0,
         }
 
 
@@ -442,6 +453,10 @@ class RuleDialog(QDialog):
         select_all_keyword_btn.clicked.connect(self.select_all_keywords)
         keyword_actions_layout.addWidget(select_all_keyword_btn)
 
+        clear_all_keyword_btn = QPushButton("一键清空")
+        clear_all_keyword_btn.clicked.connect(self.clear_all_keywords)
+        keyword_actions_layout.addWidget(clear_all_keyword_btn)
+
         keyword_actions_layout.addStretch()
         remove_keyword_btn = QPushButton("删除选中")
         remove_keyword_btn.clicked.connect(self.remove_selected_keyword)
@@ -479,28 +494,18 @@ class RuleDialog(QDialog):
                 self.match_type_combo.setCurrentIndex(2)
         type_layout.addWidget(self.match_type_combo)
         type_layout_row.addLayout(type_layout)
+
+        reply_count_layout = QVBoxLayout()
+        reply_count_layout.addWidget(QLabel("回复账号数:"))
+        self.reply_account_count_combo = QComboBox()
+        self.reply_account_count_combo.addItems(["1个账号", "2个账号", "3个账号"])
+        default_reply_account_count = getattr(self.rule, "reply_account_count", 1) if self.rule else 1
+        self.reply_account_count_combo.setCurrentIndex(max(0, min(2, default_reply_account_count - 1)))
+        reply_count_layout.addWidget(self.reply_account_count_combo)
+        type_layout_row.addLayout(reply_count_layout)
         type_layout_row.addStretch()
 
         layout.addLayout(type_layout_row)
-
-        # 延迟设置
-        delay_layout = QHBoxLayout()
-        delay_layout.addWidget(QLabel("回复延迟:"))
-        self.delay_min_spin = QDoubleSpinBox()
-        self.delay_min_spin.setRange(0.1, 30.0)
-        self.delay_min_spin.setValue(0.1 if not self.rule else self.rule.delay_min)
-        self.delay_min_spin.setSuffix("秒")
-        delay_layout.addWidget(self.delay_min_spin)
-
-        delay_layout.addWidget(QLabel("-"))
-
-        self.delay_max_spin = QDoubleSpinBox()
-        self.delay_max_spin.setRange(0.1, 30.0)
-        self.delay_max_spin.setValue(1.0 if not self.rule else self.rule.delay_max)
-        self.delay_max_spin.setSuffix("秒")
-        delay_layout.addWidget(self.delay_max_spin)
-
-        layout.addLayout(delay_layout)
 
         # 激活状态
         self.active_checkbox = QCheckBox("启用规则")
@@ -578,6 +583,10 @@ class RuleDialog(QDialog):
         if next_row >= 0:
             self.keywords_list.setCurrentRow(next_row)
 
+    def clear_all_keywords(self):
+        self.keywords_list.clear()
+        self.keyword_input.clear()
+
     def move_selected_keyword_up(self):
         self.move_selected_keyword(-1)
 
@@ -631,8 +640,7 @@ class RuleDialog(QDialog):
             'keywords': self.get_keywords(),
             'reply': self.reply_input.toPlainText().strip(),
             'match_type': match_type_map[self.match_type_combo.currentIndex()],
-            'delay_min': self.delay_min_spin.value(),
-            'delay_max': self.delay_max_spin.value(),
+            'reply_account_count': self.reply_account_count_combo.currentIndex() + 1,
             'is_active': self.active_checkbox.isChecked(),
         }
 
@@ -713,6 +721,18 @@ class BlockSettingsDialog(QDialog):
         self.blocked_keywords_input.setPlainText("\n".join(self.block_settings.blocked_keywords))
         keyword_layout.addWidget(self.blocked_keywords_input)
         layout.addWidget(keyword_group)
+
+        channel_group = QGroupBox("屏蔽频道范围")
+        channel_layout = QVBoxLayout(channel_group)
+        channel_hint = QLabel("留空表示跟随账号当前可回复的频道；填写后，只在这些频道里启用上面的屏蔽关键词和屏蔽用户。")
+        channel_hint.setStyleSheet("color: gray;")
+        channel_hint.setWordWrap(True)
+        channel_layout.addWidget(channel_hint)
+        self.blocked_channel_ids_input = QLineEdit()
+        self.blocked_channel_ids_input.setPlaceholderText("例如 123456789012345678, 234567890123456789")
+        self.blocked_channel_ids_input.setText(", ".join(map(str, self.block_settings.blocked_channel_ids)))
+        channel_layout.addWidget(self.blocked_channel_ids_input)
+        layout.addWidget(channel_group)
 
         user_group = QGroupBox("屏蔽用户")
         user_layout = QVBoxLayout(user_group)
@@ -876,6 +896,7 @@ class BlockSettingsDialog(QDialog):
         return BlockSettings(
             blocked_keywords=split_keywords(self.blocked_keywords_input.toPlainText()),
             blocked_user_ids=split_keywords(self.blocked_user_ids_input.toPlainText()),
+            blocked_channel_ids=parse_channel_ids(self.blocked_channel_ids_input.text()),
             account_scope="all" if self.scope_combo.currentIndex() == 0 else "selected",
             account_tokens=self.get_selected_account_tokens(),
             ignore_replies=self.ignore_replies_checkbox.isChecked(),
@@ -884,7 +905,12 @@ class BlockSettingsDialog(QDialog):
         )
 
     def accept(self):
-        block_settings = self.get_block_settings()
+        try:
+            block_settings = self.get_block_settings()
+        except ValueError as exc:
+            QMessageBox.warning(self, "频道格式错误", str(exc))
+            return
+
         invalid_user_ids = [user_id for user_id in block_settings.blocked_user_ids if not user_id.isdigit()]
         if invalid_user_ids:
             QMessageBox.warning(self, "格式错误", f"屏蔽用户ID只能填数字：{', '.join(invalid_user_ids)}")
@@ -953,6 +979,7 @@ class AccountEditDialog(QDialog):
     show_token_help = AccountDialog.show_token_help
     accept_and_validate = AccountDialog.accept_and_validate
     parse_target_channels = AccountDialog.parse_target_channels
+    parse_reply_delay_range = AccountDialog.parse_reply_delay_range
 
     def __init__(self, parent=None, account=None, rules=None):
         super().__init__(parent)
@@ -968,7 +995,7 @@ class AccountEditDialog(QDialog):
     def init_ui(self):
         self.setWindowTitle(f"编辑账号 - {self.account.alias}")
         self.setModal(True)
-        self.resize(620, 620)
+        self.resize(640, 680)
 
         layout = QVBoxLayout(self)
 
@@ -1012,6 +1039,10 @@ class AccountEditDialog(QDialog):
         channels_hint.setStyleSheet("color: gray;")
         channels_layout.addWidget(channels_hint)
         layout.addLayout(channels_layout)
+
+        speed_hint = QLabel("回复速度已固定为 0 秒，命中后立即回复。")
+        speed_hint.setStyleSheet("color: gray;")
+        layout.addWidget(speed_hint)
 
         rules_title = QLabel(f"配置账号 '{self.account.alias}' 使用的规则：")
         rules_title.setStyleSheet("font-weight: bold; font-size: 12px;")
@@ -1145,6 +1176,8 @@ class AccountEditDialog(QDialog):
             'last_verified': self.current_last_verified,
             'selected_rule_ids': self.get_selected_rule_ids(),
             'target_channels': self.parse_target_channels(),
+            'delay_min': 0.0,
+            'delay_max': 0.0,
         }
 
 
@@ -1543,6 +1576,10 @@ class MainWindow(QMainWindow):
         import_rules_btn.clicked.connect(self.import_rules_from_excel)
         header_layout.addWidget(import_rules_btn)
 
+        export_rules_btn = QPushButton("导出表格")
+        export_rules_btn.clicked.connect(self.export_rules_table)
+        header_layout.addWidget(export_rules_btn)
+
         add_rule_btn = QPushButton("添加规则")
         add_rule_btn.clicked.connect(self.add_rule)
         header_layout.addWidget(add_rule_btn)
@@ -1583,7 +1620,7 @@ class MainWindow(QMainWindow):
         # 规则表格
         self.rules_table = ReorderableRulesTable()
         self.rules_table.setColumnCount(5)
-        self.rules_table.setHorizontalHeaderLabels(["关键词", "回复内容", "匹配类型", "延迟", "操作"])
+        self.rules_table.setHorizontalHeaderLabels(["关键词", "回复内容", "匹配类型", "回复账号数", "操作"])
         rules_header = self.rules_table.horizontalHeader()
         rules_header.setStretchLastSection(False)
         rules_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -1605,8 +1642,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.rules_table)
 
         # 统计信息
-        self.rules_stats_label = QLabel("总规则数: 0 | 启用规则数: 0")
-        layout.addWidget(self.rules_stats_label)
+        self.rules_overview_label = QLabel("总规则数: 0 | 启用规则数: 0")
+        layout.addWidget(self.rules_overview_label)
 
         self.tab_widget.addTab(rules_widget, "规则管理")
 
@@ -1620,19 +1657,35 @@ class MainWindow(QMainWindow):
         accounts_layout = QVBoxLayout(accounts_group)
 
         self.status_accounts_table = QTableWidget()
-        self.status_accounts_table.setColumnCount(3)
-        self.status_accounts_table.setHorizontalHeaderLabels(["别名", "状态", "运行状态"])
+        self.status_accounts_table.setColumnCount(5)
+        self.status_accounts_table.setHorizontalHeaderLabels(["别名", "状态", "运行状态", "回复数", "冷却"])
         self.status_accounts_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         accounts_layout.addWidget(self.status_accounts_table)
 
         layout.addWidget(accounts_group)
 
+        history_group = QGroupBox("最近回复记录")
+        history_layout = QVBoxLayout(history_group)
+        self.reply_history_table = QTableWidget()
+        self.reply_history_table.setColumnCount(5)
+        self.reply_history_table.setHorizontalHeaderLabels(["时间", "账号", "关键词", "回复对象", "链接"])
+        history_header = self.reply_history_table.horizontalHeader()
+        history_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        history_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        history_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        history_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        history_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.reply_history_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.reply_history_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        history_layout.addWidget(self.reply_history_table)
+        layout.addWidget(history_group)
+
         # 规则统计
         rules_group = QGroupBox("规则统计")
         rules_layout = QVBoxLayout(rules_group)
 
-        self.rules_stats_label = QLabel("总规则数: 0 | 激活规则数: 0")
-        rules_layout.addWidget(self.rules_stats_label)
+        self.status_rules_stats_label = QLabel("总规则数: 0 | 激活规则数: 0")
+        rules_layout.addWidget(self.status_rules_stats_label)
 
         layout.addWidget(rules_group)
 
@@ -1691,6 +1744,7 @@ class MainWindow(QMainWindow):
         self.log_text.setMaximumHeight(200)
         self.log_text.setReadOnly(True)
         self.log_text.setFont(QFont("Consolas", 12))  # 等宽字体，便于查看
+        self.log_text.document().setMaximumBlockCount(1000)
         log_layout.addWidget(self.log_text)
 
         layout.addWidget(log_group)
@@ -1952,10 +2006,11 @@ class MainWindow(QMainWindow):
             match_item = QTableWidgetItem(match_type_name)
             self.rules_table.setItem(row, 2, match_item)
 
-            # 延迟
-            delay_info = f"{rule.delay_min:.1f}-{rule.delay_max:.1f}秒"
-            delay_item = QTableWidgetItem(delay_info)
-            self.rules_table.setItem(row, 3, delay_item)
+            # 回复账号数
+            reply_account_count = max(1, min(3, int(getattr(rule, "reply_account_count", 1) or 1)))
+            reply_count_item = QTableWidgetItem(f"{reply_account_count}个账号")
+            reply_count_item.setToolTip("命中这条规则后，会由几个账号一起回复")
+            self.rules_table.setItem(row, 3, reply_count_item)
 
             # 操作按钮
             move_up_btn = QPushButton("↑")
@@ -1995,7 +2050,7 @@ class MainWindow(QMainWindow):
         # 更新统计信息
         total_rules = len(self.discord_manager.rules)
         active_rules = len([rule for rule in self.discord_manager.rules if rule.is_active])
-        self.rules_stats_label.setText(f"总规则数: {total_rules} | 启用规则数: {active_rules}")
+        self.rules_overview_label.setText(f"总规则数: {total_rules} | 启用规则数: {active_rules}")
 
         # 应用当前搜索过滤
         self.filter_rules()
@@ -2027,6 +2082,7 @@ class MainWindow(QMainWindow):
         block_settings = self.discord_manager.block_settings
         keyword_count = len(block_settings.blocked_keywords)
         user_count = len(block_settings.blocked_user_ids)
+        channel_count = len(block_settings.blocked_channel_ids)
 
         if block_settings.account_scope == "all":
             scope_text = "全部账号"
@@ -2047,6 +2103,7 @@ class MainWindow(QMainWindow):
         summary_parts = [
             f"屏蔽关键词 {keyword_count} 项",
             f"屏蔽用户ID {user_count} 个",
+            f"屏蔽频道 {channel_count} 个" if channel_count else "屏蔽频道 跟随账号范围",
             "忽略回复消息 开启" if block_settings.ignore_replies else "忽略回复消息 关闭",
             "忽略@消息 开启" if block_settings.ignore_mentions else "忽略@消息 关闭",
             f"生效范围 {scope_text}",
@@ -2167,10 +2224,31 @@ class MainWindow(QMainWindow):
                         item.setBackground(QColor(255, 182, 193))  # 浅红色
                     self.status_accounts_table.setItem(i, 2, item)
 
+                reply_count_text = str(acc.get("reply_count", 0))
+                current_reply_count = self.status_accounts_table.item(i, 3)
+                if not current_reply_count or current_reply_count.text() != reply_count_text:
+                    self.status_accounts_table.setItem(i, 3, QTableWidgetItem(reply_count_text))
+
+                cooldown_text = format_remaining_duration(acc.get("cooldown_until"), current_time=time.time())
+                current_cooldown = self.status_accounts_table.item(i, 4)
+                if not current_cooldown or current_cooldown.text() != cooldown_text:
+                    self.status_accounts_table.setItem(i, 4, QTableWidgetItem(cooldown_text))
+
+            recent_replies = status.get("recent_replies", [])
+            self.reply_history_table.setRowCount(len(recent_replies))
+            for row, item_data in enumerate(recent_replies):
+                self.reply_history_table.setItem(row, 0, QTableWidgetItem(item_data.get("time_text", "")))
+                self.reply_history_table.setItem(row, 1, QTableWidgetItem(item_data.get("account_alias", "")))
+                self.reply_history_table.setItem(row, 2, QTableWidgetItem(item_data.get("keyword", "")))
+                self.reply_history_table.setItem(row, 3, QTableWidgetItem(item_data.get("target", "")))
+                link_item = QTableWidgetItem(item_data.get("link", ""))
+                link_item.setToolTip(item_data.get("link", ""))
+                self.reply_history_table.setItem(row, 4, link_item)
+
             # 更新规则统计
             rules_text = f"总规则数: {status['rules_count']} | 激活规则数: {status['active_rules']}"
-            if self.rules_stats_label.text() != rules_text:
-                self.rules_stats_label.setText(rules_text)
+            if self.status_rules_stats_label.text() != rules_text:
+                self.status_rules_stats_label.setText(rules_text)
 
         except Exception as e:
             # 静默处理状态更新错误，避免影响用户体验
@@ -2427,8 +2505,12 @@ class MainWindow(QMainWindow):
                 user_info=data.get('user_info'),
                 rule_ids=data.get('selected_rule_ids', list(account.rule_ids)),
                 target_channels=data.get('target_channels', list(account.target_channels)),
+                delay_min=0.0,
+                delay_max=0.0,
                 last_sent_time=account.last_sent_time if new_token == account.token else None,
+                cooldown_until=account.cooldown_until if new_token == account.token else None,
                 rate_limit_until=account.rate_limit_until if new_token == account.token else None,
+                reply_count=account.reply_count if new_token == account.token else 0,
             )
 
             self.discord_manager.accounts = replace_item_preserving_order(
@@ -2641,8 +2723,7 @@ class MainWindow(QMainWindow):
                 data['keywords'],
                 data['reply'],
                 MatchType(data['match_type']),
-                data['delay_min'],
-                data['delay_max'],
+                reply_account_count=data.get('reply_account_count', 1),
             )
 
             # 设置激活状态
@@ -2674,8 +2755,7 @@ class MainWindow(QMainWindow):
                 keywords=data['keywords'],
                 reply=data['reply'],
                 match_type=MatchType(data['match_type']),
-                delay_min=data['delay_min'],
-                delay_max=data['delay_max'],
+                reply_account_count=data.get('reply_account_count', 1),
                 is_active=data['is_active'],
             )
 
@@ -2713,6 +2793,7 @@ class MainWindow(QMainWindow):
                 item["keywords"],
                 item["reply"],
                 MatchType.PARTIAL,
+                reply_account_count=1,
             )
             if self.discord_manager.rules:
                 self.discord_manager.rules[-1].is_active = True
@@ -2725,6 +2806,44 @@ class MainWindow(QMainWindow):
         if skipped_rows:
             message += f"，跳过 {skipped_rows} 行空值或缺列数据"
         QMessageBox.information(self, "成功", message)
+
+    def export_rules_table(self):
+        """导出规则表格为 CSV"""
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出规则表格",
+            "rules.csv",
+            "CSV 文件 (*.csv)",
+        )
+        if not filename:
+            return
+
+        rows = []
+        for index, rule in enumerate(self.discord_manager.rules, start=1):
+            match_type_name = {
+                "partial": "部分匹配",
+                "exact": "精确匹配",
+                "regex": "正则表达式",
+            }[rule.match_type.value]
+            rows.append([
+                index,
+                " | ".join(rule.keywords),
+                rule.reply,
+                match_type_name,
+                f"{getattr(rule, 'reply_account_count', 1)}个账号",
+                "是" if rule.is_active else "否",
+            ])
+
+        try:
+            with open(filename, "w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["序号", "关键词", "回复内容", "匹配类型", "回复账号数", "是否启用"])
+                writer.writerows(rows)
+        except Exception as exc:
+            QMessageBox.warning(self, "导出失败", f"导出规则表格时出错：{exc}")
+            return
+
+        QMessageBox.information(self, "成功", f"规则表格已导出到：{filename}")
 
     def edit_rule_by_id(self, rule_id: str):
         rule_index = self.get_rule_index_by_id(rule_id)
@@ -2859,27 +2978,26 @@ class MainWindow(QMainWindow):
         """添加日志"""
         import datetime
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        safe_message = html.escape(str(message))
 
         # 根据级别设置颜色和前缀
         if level == "error":
-            colored_msg = f'<span style="color: red;">[{timestamp}] ❌ {message}</span>'
+            colored_msg = f'<span style="color: red;">[{timestamp}] ❌ {safe_message}</span>'
         elif level == "warning":
-            colored_msg = f'<span style="color: orange;">[{timestamp}] ⚠️ {message}</span>'
+            colored_msg = f'<span style="color: orange;">[{timestamp}] ⚠️ {safe_message}</span>'
         elif level == "success":
-            colored_msg = f'<span style="color: green;">[{timestamp}] ✅ {message}</span>'
+            colored_msg = f'<span style="color: green;">[{timestamp}] ✅ {safe_message}</span>'
         elif level == "info":
-            colored_msg = f'<span style="color: blue;">[{timestamp}] ℹ️ {message}</span>'
+            colored_msg = f'<span style="color: blue;">[{timestamp}] ℹ️ {safe_message}</span>'
         else:
-            colored_msg = f'[{timestamp}] {message}'
+            colored_msg = f'[{timestamp}] {safe_message}'
 
-        # 添加到日志文本框，增加行距
-        current_text = self.log_text.toHtml()
-        if current_text:
-            new_text = current_text + '<div style="margin: 2px 0;">' + colored_msg + '</div>'
-        else:
-            new_text = '<div style="margin: 2px 0;">' + colored_msg + '</div>'
-
-        self.log_text.setHtml(new_text)
+        cursor = self.log_text.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        if not self.log_text.document().isEmpty():
+            cursor.insertBlock()
+        cursor.insertHtml(colored_msg)
+        self.log_text.setTextCursor(cursor)
 
         # 自动滚动到底部
         if self.auto_scroll_log:
@@ -2960,6 +3078,7 @@ class MainWindow(QMainWindow):
                 rules or
                 block_settings.blocked_keywords or
                 block_settings.blocked_user_ids or
+                block_settings.blocked_channel_ids or
                 not block_settings.ignore_replies or
                 not block_settings.ignore_mentions or
                 block_settings.case_sensitive
