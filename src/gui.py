@@ -29,6 +29,7 @@ from gui_helpers import (
     move_item_in_list,
     normalize_reorder_target_row,
     parse_channel_ids,
+    parse_rule_import_file,
     parse_selection_ranges,
     replace_item_preserving_order,
     split_keywords,
@@ -388,7 +389,7 @@ class RuleDialog(QDialog):
     def init_ui(self):
         self.setWindowTitle("添加规则" if not self.rule else "编辑规则")
         self.setModal(True)
-        self.resize(560, 460)
+        self.resize(560, 360)
 
         layout = QVBoxLayout(self)
 
@@ -499,24 +500,6 @@ class RuleDialog(QDialog):
         self.active_checkbox.setChecked(True if not self.rule else self.rule.is_active)
         layout.addWidget(self.active_checkbox)
 
-        # 忽略回复消息
-        self.ignore_replies_checkbox = QCheckBox("忽略回复消息")
-        self.ignore_replies_checkbox.setToolTip("启用后，当有人回复别人的消息时，不会再回复这条回复消息")
-        self.ignore_replies_checkbox.setChecked(True if not self.rule else getattr(self.rule, 'ignore_replies', False))
-        layout.addWidget(self.ignore_replies_checkbox)
-
-        # 忽略@消息
-        self.ignore_mentions_checkbox = QCheckBox("忽略@消息")
-        self.ignore_mentions_checkbox.setToolTip("启用后，当消息中包含@他人时，不会回复这条消息")
-        self.ignore_mentions_checkbox.setChecked(True if not self.rule else getattr(self.rule, 'ignore_mentions', False))
-        layout.addWidget(self.ignore_mentions_checkbox)
-
-        # 大小写敏感
-        self.case_sensitive_checkbox = QCheckBox("区分大小写")
-        self.case_sensitive_checkbox.setToolTip("启用后，关键词匹配将区分大小写")
-        self.case_sensitive_checkbox.setChecked(False if not self.rule else getattr(self.rule, 'case_sensitive', False))
-        layout.addWidget(self.case_sensitive_checkbox)
-
         # 按钮
         buttons_layout = QHBoxLayout()
         buttons_layout.addStretch()
@@ -621,14 +604,11 @@ class RuleDialog(QDialog):
             'delay_min': self.delay_min_spin.value(),
             'delay_max': self.delay_max_spin.value(),
             'is_active': self.active_checkbox.isChecked(),
-            'ignore_replies': self.ignore_replies_checkbox.isChecked(),
-            'ignore_mentions': self.ignore_mentions_checkbox.isChecked(),
-            'case_sensitive': self.case_sensitive_checkbox.isChecked(),
         }
 
 
 class BlockSettingsDialog(QDialog):
-    """整体屏蔽设置对话框"""
+    """整体屏蔽和匹配设置对话框"""
 
     def __init__(self, parent=None, block_settings=None, accounts=None):
         super().__init__(parent)
@@ -638,9 +618,9 @@ class BlockSettingsDialog(QDialog):
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle("整体屏蔽设置")
+        self.setWindowTitle("整体匹配和屏蔽设置")
         self.setModal(True)
-        self.resize(640, 720)
+        self.resize(760, 760)
 
         layout = QVBoxLayout(self)
 
@@ -654,9 +634,32 @@ class BlockSettingsDialog(QDialog):
         scope_layout.addStretch()
         layout.addLayout(scope_layout)
 
-        self.case_sensitive_checkbox = QCheckBox("屏蔽关键词区分大小写")
+        match_group = QGroupBox("通用匹配设置")
+        match_layout = QVBoxLayout(match_group)
+        match_hint = QLabel("这些设置会统一作用到所有规则，也会影响关键词屏蔽的匹配方式。")
+        match_hint.setStyleSheet("color: gray;")
+        match_hint.setWordWrap(True)
+        match_layout.addWidget(match_hint)
+
+        match_options_layout = QHBoxLayout()
+        self.ignore_replies_checkbox = QCheckBox("忽略回复消息")
+        self.ignore_replies_checkbox.setToolTip("启用后，别人回复某条消息时，这类消息不会触发自动回复。")
+        self.ignore_replies_checkbox.setChecked(self.block_settings.ignore_replies)
+        match_options_layout.addWidget(self.ignore_replies_checkbox)
+
+        self.ignore_mentions_checkbox = QCheckBox("忽略@消息")
+        self.ignore_mentions_checkbox.setToolTip("启用后，消息里带 @ 时，这类消息不会触发自动回复。")
+        self.ignore_mentions_checkbox.setChecked(self.block_settings.ignore_mentions)
+        match_options_layout.addWidget(self.ignore_mentions_checkbox)
+
+        self.case_sensitive_checkbox = QCheckBox("关键词区分大小写")
+        self.case_sensitive_checkbox.setToolTip("启用后，规则关键词和屏蔽关键词都会按大小写精确匹配。")
         self.case_sensitive_checkbox.setChecked(self.block_settings.case_sensitive)
-        layout.addWidget(self.case_sensitive_checkbox)
+        match_options_layout.addWidget(self.case_sensitive_checkbox)
+        match_options_layout.addStretch()
+        match_layout.addLayout(match_options_layout)
+
+        layout.addWidget(match_group)
 
         keyword_group = QGroupBox("屏蔽关键词")
         keyword_layout = QVBoxLayout(keyword_group)
@@ -665,7 +668,14 @@ class BlockSettingsDialog(QDialog):
         keyword_hint.setWordWrap(True)
         keyword_layout.addWidget(keyword_hint)
         self.blocked_keywords_input = QTextEdit()
-        self.blocked_keywords_input.setMaximumHeight(110)
+        self.blocked_keywords_input.setReadOnly(False)
+        self.blocked_keywords_input.setAcceptRichText(False)
+        self.blocked_keywords_input.setMinimumHeight(88)
+        self.blocked_keywords_input.setMaximumHeight(96)
+        self.blocked_keywords_input.setStyleSheet(
+            "QTextEdit { background-color: white; color: #202020; border: 1px solid #c8c8c8; border-radius: 4px; }"
+            "QTextEdit:focus { border: 1px solid #0078d4; }"
+        )
         self.blocked_keywords_input.setPlaceholderText("例如：http\ndiscord.gg\n广告")
         self.blocked_keywords_input.setPlainText("\n".join(self.block_settings.blocked_keywords))
         keyword_layout.addWidget(self.blocked_keywords_input)
@@ -678,7 +688,14 @@ class BlockSettingsDialog(QDialog):
         user_hint.setWordWrap(True)
         user_layout.addWidget(user_hint)
         self.blocked_user_ids_input = QTextEdit()
-        self.blocked_user_ids_input.setMaximumHeight(110)
+        self.blocked_user_ids_input.setReadOnly(False)
+        self.blocked_user_ids_input.setAcceptRichText(False)
+        self.blocked_user_ids_input.setMinimumHeight(88)
+        self.blocked_user_ids_input.setMaximumHeight(96)
+        self.blocked_user_ids_input.setStyleSheet(
+            "QTextEdit { background-color: white; color: #202020; border: 1px solid #c8c8c8; border-radius: 4px; }"
+            "QTextEdit:focus { border: 1px solid #0078d4; }"
+        )
         self.blocked_user_ids_input.setPlaceholderText("一行一个或逗号分隔，例如：\n123456789012345678")
         self.blocked_user_ids_input.setPlainText("\n".join(self.block_settings.blocked_user_ids))
         user_layout.addWidget(self.blocked_user_ids_input)
@@ -686,6 +703,11 @@ class BlockSettingsDialog(QDialog):
 
         account_group = QGroupBox("指定生效账号")
         account_layout = QVBoxLayout(account_group)
+
+        self.account_scope_hint_label = QLabel()
+        self.account_scope_hint_label.setStyleSheet("color: gray;")
+        self.account_scope_hint_label.setWordWrap(True)
+        account_layout.addWidget(self.account_scope_hint_label)
 
         range_layout = QHBoxLayout()
         range_layout.addWidget(QLabel("按序号选择:"))
@@ -723,6 +745,10 @@ class BlockSettingsDialog(QDialog):
         scroll_layout.addStretch()
         scroll_area.setWidget(scroll_widget)
         scroll_area.setWidgetResizable(True)
+        scroll_area.setMinimumHeight(240)
+        scroll_area.setStyleSheet(
+            "QScrollArea { background-color: white; border: 1px solid #c8c8c8; border-radius: 4px; }"
+        )
         account_layout.addWidget(scroll_area)
 
         self.account_stats_label = QLabel()
@@ -763,7 +789,10 @@ class BlockSettingsDialog(QDialog):
 
     def update_account_scope_state(self):
         is_selected_scope = self.scope_combo.currentIndex() == 1
-        self.account_group.setEnabled(is_selected_scope)
+        if is_selected_scope:
+            self.account_scope_hint_label.setText("当前是指定账号生效。下面勾选的账号会真正生效。")
+        else:
+            self.account_scope_hint_label.setText("当前是全部账号生效。下面的勾选会保留，但现在不会限制生效范围。")
 
     def update_account_stats_label(self):
         selected_count = sum(1 for _, checkbox in self.account_checkboxes if checkbox.isChecked())
@@ -816,6 +845,8 @@ class BlockSettingsDialog(QDialog):
             blocked_user_ids=split_keywords(self.blocked_user_ids_input.toPlainText()),
             account_scope="all" if self.scope_combo.currentIndex() == 0 else "selected",
             account_tokens=self.get_selected_account_tokens(),
+            ignore_replies=self.ignore_replies_checkbox.isChecked(),
+            ignore_mentions=self.ignore_mentions_checkbox.isChecked(),
             case_sensitive=self.case_sensitive_checkbox.isChecked(),
         )
 
@@ -1441,14 +1472,14 @@ class MainWindow(QMainWindow):
         rules_widget = QWidget()
         layout = QVBoxLayout(rules_widget)
 
-        block_group = QGroupBox("整体屏蔽设置")
+        block_group = QGroupBox("整体匹配和屏蔽设置")
         block_layout = QVBoxLayout(block_group)
         self.block_settings_summary_label = QLabel()
         self.block_settings_summary_label.setWordWrap(True)
         block_layout.addWidget(self.block_settings_summary_label)
 
         block_controls_layout = QHBoxLayout()
-        edit_block_settings_btn = QPushButton("编辑屏蔽设置")
+        edit_block_settings_btn = QPushButton("编辑整体设置")
         edit_block_settings_btn.clicked.connect(self.edit_block_settings)
         block_controls_layout.addWidget(edit_block_settings_btn)
         block_controls_layout.addStretch()
@@ -1467,6 +1498,10 @@ class MainWindow(QMainWindow):
 
         header_layout.addStretch()
 
+        import_rules_btn = QPushButton("Excel导入")
+        import_rules_btn.clicked.connect(self.import_rules_from_excel)
+        header_layout.addWidget(import_rules_btn)
+
         add_rule_btn = QPushButton("添加规则")
         add_rule_btn.clicked.connect(self.add_rule)
         header_layout.addWidget(add_rule_btn)
@@ -1475,16 +1510,16 @@ class MainWindow(QMainWindow):
 
         # 规则表格
         self.rules_table = ReorderableRulesTable()
-        self.rules_table.setColumnCount(7)
-        self.rules_table.setHorizontalHeaderLabels(["关键词", "回复内容", "匹配类型", "延迟", "忽略回复", "忽略@", "操作"])
+        self.rules_table.setColumnCount(5)
+        self.rules_table.setHorizontalHeaderLabels(["关键词", "回复内容", "匹配类型", "延迟", "操作"])
         rules_header = self.rules_table.horizontalHeader()
         rules_header.setStretchLastSection(False)
         rules_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         rules_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for column in range(2, 6):
+        for column in range(2, 4):
             rules_header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
-        rules_header.setSectionResizeMode(6, QHeaderView.ResizeMode.Interactive)
-        self.rules_table.setColumnWidth(6, 220)
+        rules_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        self.rules_table.setColumnWidth(4, 220)
         self.rules_table.setAlternatingRowColors(True)
         self.rules_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.rules_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
@@ -1535,18 +1570,19 @@ class MainWindow(QMainWindow):
 
         # 启用轮换
         self.rotation_enabled_checkbox = QCheckBox("启用账号轮换")
-        self.rotation_enabled_checkbox.setToolTip("启用后，当账号被频率限制时会自动切换到其他账号发送消息")
+        self.rotation_enabled_checkbox.setToolTip("启用后，每次只会由一个账号发送，发送后进入冷却，下次自动切换到没冷却的账号。")
         self.rotation_enabled_checkbox.stateChanged.connect(self.on_rotation_enabled_changed)
         rotation_layout.addWidget(self.rotation_enabled_checkbox)
 
         # 轮换间隔设置
         interval_layout = QHBoxLayout()
-        interval_layout.addWidget(QLabel("轮换间隔(秒):"))
+        interval_layout.addWidget(QLabel("账号冷却时间(秒):"))
         self.rotation_interval_spin = QSpinBox()
         self.rotation_interval_spin.setRange(1, 3600)  # 1秒到1小时
         self.rotation_interval_spin.setValue(10)  # 默认10秒
         self.rotation_interval_spin.setSuffix("秒")
         self.rotation_interval_spin.setEnabled(False)  # 默认禁用
+        self.rotation_interval_spin.valueChanged.connect(self.on_rotation_interval_changed)
         interval_layout.addWidget(self.rotation_interval_spin)
         interval_layout.addStretch()
         rotation_layout.addLayout(interval_layout)
@@ -1817,18 +1853,6 @@ class MainWindow(QMainWindow):
             delay_item = QTableWidgetItem(delay_info)
             self.rules_table.setItem(row, 3, delay_item)
 
-            # 忽略回复
-            ignore_replies_status = "是" if getattr(rule, 'ignore_replies', False) else "否"
-            ignore_item = QTableWidgetItem(ignore_replies_status)
-            ignore_item.setData(Qt.ItemDataRole.ToolTipRole, "是否忽略回复他人的消息")
-            self.rules_table.setItem(row, 4, ignore_item)
-
-            # 忽略@
-            ignore_mentions_status = "是" if getattr(rule, 'ignore_mentions', False) else "否"
-            mentions_item = QTableWidgetItem(ignore_mentions_status)
-            mentions_item.setData(Qt.ItemDataRole.ToolTipRole, "是否忽略包含@他人的消息")
-            self.rules_table.setItem(row, 5, mentions_item)
-
             # 操作按钮
             move_up_btn = QPushButton("↑")
             move_up_btn.setProperty("compactMoveButton", True)
@@ -1862,7 +1886,7 @@ class MainWindow(QMainWindow):
             button_layout.addWidget(edit_btn)
             button_layout.addWidget(delete_btn)
 
-            self.rules_table.setCellWidget(row, 6, button_widget)
+            self.rules_table.setCellWidget(row, 4, button_widget)
 
         # 更新统计信息
         total_rules = len(self.discord_manager.rules)
@@ -1919,6 +1943,8 @@ class MainWindow(QMainWindow):
         summary_parts = [
             f"屏蔽关键词 {keyword_count} 项",
             f"屏蔽用户ID {user_count} 个",
+            "忽略回复消息 开启" if block_settings.ignore_replies else "忽略回复消息 关闭",
+            "忽略@消息 开启" if block_settings.ignore_mentions else "忽略@消息 关闭",
             f"生效范围 {scope_text}",
         ]
 
@@ -1926,7 +1952,7 @@ class MainWindow(QMainWindow):
             summary_parts.append("关键词大小写敏感已开启")
 
         if keyword_count == 0 and user_count == 0:
-            summary_parts.insert(0, "当前还没有设置任何整体屏蔽条件")
+            summary_parts.insert(0, "当前还没有设置屏蔽关键词或屏蔽用户")
 
         self.block_settings_summary_label.setText(" | ".join(summary_parts))
 
@@ -1942,7 +1968,7 @@ class MainWindow(QMainWindow):
         self.discord_manager.block_settings = dialog.get_block_settings()
         self.save_config()
         self.update_block_settings_summary()
-        QMessageBox.information(self, "成功", "整体屏蔽设置已更新")
+        QMessageBox.information(self, "成功", "整体设置已更新")
 
     def move_rule_by_step(self, source_row: int, step: int):
         total_rules = len(self.discord_manager.rules)
@@ -2450,9 +2476,6 @@ class MainWindow(QMainWindow):
                 MatchType(data['match_type']),
                 data['delay_min'],
                 data['delay_max'],
-                data.get('ignore_replies', False),
-                data.get('ignore_mentions', False),
-                data.get('case_sensitive', False),
             )
 
             # 设置激活状态
@@ -2487,14 +2510,54 @@ class MainWindow(QMainWindow):
                 delay_min=data['delay_min'],
                 delay_max=data['delay_max'],
                 is_active=data['is_active'],
-                ignore_replies=data.get('ignore_replies', False),
-                ignore_mentions=data.get('ignore_mentions', False),
-                case_sensitive=data.get('case_sensitive', False),
             )
 
             self.update_rules_list()
             self.save_config()
             QMessageBox.information(self, "成功", "规则编辑成功")
+
+    def import_rules_from_excel(self):
+        """通过 Excel 或 CSV 批量导入规则"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "导入规则",
+            "",
+            "Excel 文件 (*.xlsx);;CSV 文件 (*.csv)",
+        )
+        if not filename:
+            return
+
+        try:
+            imported_rules, skipped_rows = parse_rule_import_file(filename)
+        except ValueError as exc:
+            QMessageBox.warning(self, "导入失败", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.warning(self, "导入失败", f"读取文件时出错：{exc}")
+            return
+
+        if not imported_rules:
+            QMessageBox.warning(self, "导入失败", "没有读到可导入的规则，请检查前两列是否分别为关键词和回复内容。")
+            return
+
+        imported_count = 0
+        for item in imported_rules:
+            self.discord_manager.add_rule(
+                item["keywords"],
+                item["reply"],
+                MatchType.PARTIAL,
+            )
+            if self.discord_manager.rules:
+                self.discord_manager.rules[-1].is_active = True
+                imported_count += 1
+
+        self.update_rules_list()
+        self.save_config()
+
+        message = f"成功导入 {imported_count} 条规则"
+        if skipped_rows:
+            message += f"，跳过 {skipped_rows} 行空值或缺列数据"
+        QMessageBox.information(self, "成功", message)
 
     def edit_rule_by_id(self, rule_id: str):
         rule_index = self.get_rule_index_by_id(rule_id)
@@ -2679,7 +2742,7 @@ class MainWindow(QMainWindow):
         self.discord_manager.rotation_enabled = enabled
         if enabled:
             self.discord_manager.rotation_interval = self.rotation_interval_spin.value()  # 直接使用秒
-            self.rotation_status_label.setText(f"轮换模式: 已启用 (间隔{self.rotation_interval_spin.value()}秒)")
+            self.rotation_status_label.setText(f"轮换模式: 已启用 (冷却{self.rotation_interval_spin.value()}秒)")
         else:
             self.rotation_status_label.setText("轮换模式: 未启用")
 
@@ -2689,6 +2752,15 @@ class MainWindow(QMainWindow):
         if self.log_callback:
             status = "启用" if enabled else "禁用"
             self.log_callback(f"账号轮换模式已{status}")
+
+    def on_rotation_interval_changed(self, value):
+        """轮换冷却时间改变时立即生效"""
+        self.discord_manager.rotation_interval = value
+        if self.rotation_enabled_checkbox.isChecked():
+            self.rotation_status_label.setText(f"轮换模式: 已启用 (冷却{value}秒)")
+            self.save_config()
+            if self.log_callback:
+                self.log_callback(f"账号轮换冷却时间已更新为 {value} 秒")
 
     def on_error(self, error_msg):
         """错误处理"""
@@ -2718,7 +2790,15 @@ class MainWindow(QMainWindow):
         )
         if filename:
             accounts, rules, block_settings = self.config_manager.import_config(filename)
-            if accounts or rules or block_settings.blocked_keywords or block_settings.blocked_user_ids:
+            if (
+                accounts or
+                rules or
+                block_settings.blocked_keywords or
+                block_settings.blocked_user_ids or
+                not block_settings.ignore_replies or
+                not block_settings.ignore_mentions or
+                block_settings.case_sensitive
+            ):
                 self.discord_manager.accounts = accounts
                 self.discord_manager.rules = rules
                 self.discord_manager.block_settings = block_settings

@@ -1,5 +1,8 @@
 import unittest
 from dataclasses import dataclass
+import tempfile
+import zipfile
+from pathlib import Path
 
 from src.gui_helpers import (
     apply_checked_indices,
@@ -12,6 +15,7 @@ from src.gui_helpers import (
     move_item_in_list,
     normalize_reorder_target_row,
     parse_channel_ids,
+    parse_rule_import_file,
     parse_selection_ranges,
     replace_item_preserving_order,
     split_keywords,
@@ -36,6 +40,61 @@ class ParseChannelIdsTests(unittest.TestCase):
     def test_rejects_non_numeric_values(self):
         with self.assertRaises(ValueError):
             parse_channel_ids("123, abc")
+
+
+class ParseRuleImportFileTests(unittest.TestCase):
+    def test_imports_csv_using_first_two_columns_and_skips_header(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "rules.csv"
+            csv_path.write_text(
+                "关键词,回复内容,其他列\n"
+                "hello,hi there,ignore me\n"
+                "world,hello world,\n"
+                ",missing keyword,\n",
+                encoding="utf-8",
+            )
+
+            imported_rules, skipped_rows = parse_rule_import_file(str(csv_path))
+
+            self.assertEqual(
+                imported_rules,
+                [
+                    {"keywords": ["hello"], "reply": "hi there"},
+                    {"keywords": ["world"], "reply": "hello world"},
+                ],
+            )
+            self.assertEqual(skipped_rows, 1)
+
+    def test_imports_xlsx_using_first_two_columns(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            xlsx_path = Path(temp_dir) / "rules.xlsx"
+            build_test_xlsx(
+                xlsx_path,
+                rows=[
+                    ["关键词", "回复内容"],
+                    ["hello, hi", "welcome"],
+                    ["bye", "see you"],
+                ],
+            )
+
+            imported_rules, skipped_rows = parse_rule_import_file(str(xlsx_path))
+
+            self.assertEqual(
+                imported_rules,
+                [
+                    {"keywords": ["hello", "hi"], "reply": "welcome"},
+                    {"keywords": ["bye"], "reply": "see you"},
+                ],
+            )
+            self.assertEqual(skipped_rows, 0)
+
+    def test_rejects_unsupported_file_types(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            txt_path = Path(temp_dir) / "rules.txt"
+            txt_path.write_text("hello,world", encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                parse_rule_import_file(str(txt_path))
 
 
 class ParseSelectionRangesTests(unittest.TestCase):
@@ -213,6 +272,83 @@ class CanMoveAdjacentRowTests(unittest.TestCase):
         self.assertFalse(
             can_move_adjacent_row(current_index=3, item_count=4, step=1),
         )
+
+
+def build_test_xlsx(path: Path, rows):
+    shared_strings = []
+    shared_index = {}
+
+    def get_shared_string_index(value: str) -> int:
+        if value not in shared_index:
+            shared_index[value] = len(shared_strings)
+            shared_strings.append(value)
+        return shared_index[value]
+
+    worksheet_rows = []
+    for row_number, row_values in enumerate(rows, start=1):
+        cells = []
+        for column_index, value in enumerate(row_values, start=1):
+            if value is None:
+                continue
+            cell_ref = f"{chr(64 + column_index)}{row_number}"
+            shared_string_index = get_shared_string_index(str(value))
+            cells.append(
+                f'<c r="{cell_ref}" t="s"><v>{shared_string_index}</v></c>'
+            )
+        worksheet_rows.append(f'<row r="{row_number}">{"".join(cells)}</row>')
+
+    shared_strings_xml = (
+        f'<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        f'count="{len(shared_strings)}" uniqueCount="{len(shared_strings)}">'
+        + "".join(f"<si><t>{value}</t></si>" for value in shared_strings)
+        + "</sst>"
+    )
+    sheet_xml = (
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        "<sheetData>"
+        + "".join(worksheet_rows)
+        + "</sheetData></worksheet>"
+    )
+
+    with zipfile.ZipFile(path, "w") as workbook:
+        workbook.writestr(
+            "[Content_Types].xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+    <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+    <Default Extension="xml" ContentType="application/xml"/>
+    <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+    <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+    <Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+</Types>""",
+        )
+        workbook.writestr(
+            "_rels/.rels",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+    <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>""",
+        )
+        workbook.writestr(
+            "xl/workbook.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <sheets>
+        <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+    </sheets>
+</workbook>""",
+        )
+        workbook.writestr(
+            "xl/_rels/workbook.xml.rels",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+    <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+    <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>
+</Relationships>""",
+        )
+        workbook.writestr("xl/sharedStrings.xml", shared_strings_xml)
+        workbook.writestr("xl/worksheets/sheet1.xml", sheet_xml)
 
 
 if __name__ == "__main__":

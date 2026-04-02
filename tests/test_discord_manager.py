@@ -49,11 +49,14 @@ class FakeClient:
 
 
 class FakeMessageSender:
-    def __init__(self, side_effects=None):
+    def __init__(self, side_effects=None, delay=0.0):
         self.side_effects = list(side_effects or [])
         self.sent_messages = []
+        self.delay = delay
 
     async def send(self, content=None, **kwargs):
+        if self.delay:
+            await asyncio.sleep(self.delay)
         self.sent_messages.append({"content": content, "kwargs": kwargs})
 
         if self.side_effects:
@@ -212,6 +215,66 @@ class DiscordManagerStartupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fallback_sender.sent_messages[0]["content"], "fallback reply")
         self.assertIn(1001, self.manager.replied_messages)
         self.assertEqual(message.reply_calls, [])
+
+    async def test_rotation_puts_account_into_cooldown_and_reuses_after_expiry(self):
+        self.manager.rotation_enabled = True
+        self.manager.rotation_interval = 10
+        self.manager.accounts = [
+            Account(token="token-1", is_active=True, is_valid=True),
+            Account(token="token-2", is_active=True, is_valid=True),
+        ]
+        sender_one = FakeMessageSender()
+        sender_two = FakeMessageSender()
+        self.manager.clients = [
+            FakeRotationClient(self.manager.accounts[0], sender=sender_one),
+            FakeRotationClient(self.manager.accounts[1], sender=sender_two),
+        ]
+
+        with patch("src.discord_client.time.time", return_value=100.0):
+            first_success = await self.manager.send_rotated_reply(FakeMessage(message_id=2001), "first")
+
+        with patch("src.discord_client.time.time", return_value=101.0):
+            second_success = await self.manager.send_rotated_reply(FakeMessage(message_id=2002), "second")
+
+        with patch("src.discord_client.time.time", return_value=105.0):
+            third_success = await self.manager.send_rotated_reply(FakeMessage(message_id=2003), "third")
+
+        with patch("src.discord_client.time.time", return_value=112.0):
+            fourth_success = await self.manager.send_rotated_reply(FakeMessage(message_id=2004), "fourth")
+
+        self.assertTrue(first_success)
+        self.assertTrue(second_success)
+        self.assertFalse(third_success)
+        self.assertTrue(fourth_success)
+        self.assertEqual([item["content"] for item in sender_one.sent_messages], ["first", "fourth"])
+        self.assertEqual([item["content"] for item in sender_two.sent_messages], ["second"])
+        self.assertEqual(self.manager.accounts[0].cooldown_until, 122.0)
+        self.assertEqual(self.manager.accounts[1].cooldown_until, 111.0)
+
+    async def test_concurrent_rotation_attempts_only_send_once_per_message(self):
+        self.manager.rotation_enabled = True
+        self.manager.accounts = [
+            Account(token="token-1", is_active=True, is_valid=True),
+            Account(token="token-2", is_active=True, is_valid=True),
+        ]
+        shared_message = FakeMessage(message_id=3001)
+        sender_one = FakeMessageSender(delay=0.01)
+        sender_two = FakeMessageSender(delay=0.01)
+        self.manager.clients = [
+            FakeRotationClient(self.manager.accounts[0], sender=sender_one),
+            FakeRotationClient(self.manager.accounts[1], sender=sender_two),
+        ]
+
+        results = await asyncio.gather(
+            self.manager.send_rotated_reply(shared_message, "once only"),
+            self.manager.send_rotated_reply(shared_message, "once only"),
+        )
+
+        self.assertEqual(results.count(True), 1)
+        self.assertEqual(results.count(False), 1)
+        total_sent = len(sender_one.sent_messages) + len(sender_two.sent_messages)
+        self.assertEqual(total_sent, 1)
+        self.assertIn(3001, self.manager.replied_messages)
 
 
 if __name__ == "__main__":

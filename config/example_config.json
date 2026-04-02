@@ -12,6 +12,8 @@
     "blocked_user_ids": ["123456789012345678"],
     "account_scope": "all",
     "account_tokens": [],
+    "ignore_replies": true,
+    "ignore_mentions": true,
     "case_sensitive": false
   },
   "rules": [

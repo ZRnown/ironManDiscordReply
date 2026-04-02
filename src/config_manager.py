@@ -61,6 +61,17 @@ class ConfigManager:
             merged_channels.extend(getattr(rule, "target_channels", []))
         return cls._dedupe_int_values(merged_channels)
 
+    @staticmethod
+    def _derive_uniform_rule_toggle(rule_data_list: List[Dict[str, Any]], key: str, default: bool) -> bool:
+        values = {
+            bool(rule_data[key])
+            for rule_data in rule_data_list
+            if key in rule_data
+        }
+        if len(values) == 1:
+            return values.pop()
+        return default
+
     def save_config(self, accounts: List[Account], rules: List[Rule], block_settings: BlockSettings):
         """保存配置到文件"""
         config_data = {
@@ -81,6 +92,8 @@ class ConfigManager:
                 "blocked_user_ids": block_settings.blocked_user_ids,
                 "account_scope": block_settings.account_scope,
                 "account_tokens": block_settings.account_tokens,
+                "ignore_replies": block_settings.ignore_replies,
+                "ignore_mentions": block_settings.ignore_mentions,
                 "case_sensitive": block_settings.case_sensitive,
             },
             "rules": [
@@ -161,6 +174,9 @@ class ConfigManager:
                 rule.target_channels = []
 
             block_settings_data = config_data.get("block_settings", {})
+            legacy_ignore_replies = self._derive_uniform_rule_toggle(config_data.get("rules", []), "ignore_replies", True)
+            legacy_ignore_mentions = self._derive_uniform_rule_toggle(config_data.get("rules", []), "ignore_mentions", True)
+            legacy_case_sensitive = self._derive_uniform_rule_toggle(config_data.get("rules", []), "case_sensitive", False)
             blocked_keywords = block_settings_data.get("blocked_keywords", [])
             if isinstance(blocked_keywords, str):
                 blocked_keywords = [blocked_keywords]
@@ -180,7 +196,9 @@ class ConfigManager:
                 blocked_user_ids=blocked_user_ids,
                 account_scope=block_settings_data.get("account_scope", "all"),
                 account_tokens=account_tokens,
-                case_sensitive=block_settings_data.get("case_sensitive", False),
+                ignore_replies=block_settings_data.get("ignore_replies", legacy_ignore_replies),
+                ignore_mentions=block_settings_data.get("ignore_mentions", legacy_ignore_mentions),
+                case_sensitive=block_settings_data.get("case_sensitive", legacy_case_sensitive),
             )
 
             return accounts, rules, block_settings
@@ -207,6 +225,8 @@ class ConfigManager:
                     "blocked_user_ids": block_settings.blocked_user_ids,
                     "account_scope": block_settings.account_scope,
                     "account_tokens": block_settings.account_tokens,
+                    "ignore_replies": block_settings.ignore_replies,
+                    "ignore_mentions": block_settings.ignore_mentions,
                     "case_sensitive": block_settings.case_sensitive,
                 },
                 "rules": [
@@ -282,6 +302,9 @@ class ConfigManager:
                 rule.target_channels = []
 
             block_settings_data = config_data.get("block_settings", {})
+            legacy_ignore_replies = self._derive_uniform_rule_toggle(config_data.get("rules", []), "ignore_replies", True)
+            legacy_ignore_mentions = self._derive_uniform_rule_toggle(config_data.get("rules", []), "ignore_mentions", True)
+            legacy_case_sensitive = self._derive_uniform_rule_toggle(config_data.get("rules", []), "case_sensitive", False)
             blocked_keywords = block_settings_data.get("blocked_keywords", [])
             if isinstance(blocked_keywords, str):
                 blocked_keywords = [blocked_keywords]
@@ -301,7 +324,9 @@ class ConfigManager:
                 blocked_user_ids=blocked_user_ids,
                 account_scope=block_settings_data.get("account_scope", "all"),
                 account_tokens=account_tokens,
-                case_sensitive=block_settings_data.get("case_sensitive", False),
+                ignore_replies=block_settings_data.get("ignore_replies", legacy_ignore_replies),
+                ignore_mentions=block_settings_data.get("ignore_mentions", legacy_ignore_mentions),
+                case_sensitive=block_settings_data.get("case_sensitive", legacy_case_sensitive),
             )
 
             return accounts, rules, block_settings

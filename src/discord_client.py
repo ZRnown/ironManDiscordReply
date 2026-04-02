@@ -27,6 +27,7 @@ class Account:
     rule_ids: List[str] = None  # 关联的规则ID列表
     target_channels: List[int] = None  # 账号生效频道列表，空表示全部频道
     last_sent_time: Optional[float] = None  # 最后发送消息时间
+    cooldown_until: Optional[float] = None  # 轮换冷却到期时间
     rate_limit_until: Optional[float] = None  # 频率限制到期时间
 
     def __post_init__(self):
@@ -92,6 +93,8 @@ class BlockSettings:
     blocked_user_ids: List[str] = field(default_factory=list)
     account_scope: str = "all"  # all | selected
     account_tokens: List[str] = field(default_factory=list)
+    ignore_replies: bool = True
+    ignore_mentions: bool = True
     case_sensitive: bool = False
 
     def __post_init__(self):
@@ -141,6 +144,12 @@ class BlockSettings:
         if self.blocks_user(author_id):
             return True
         return self.blocks_content(content)
+
+    def should_ignore_reply_message(self, message_reference) -> bool:
+        return self.ignore_replies and message_reference is not None
+
+    def should_ignore_mention_message(self, mentions) -> bool:
+        return self.ignore_mentions and bool(mentions)
 
 
 class AutoReplyClient(discord.Client):
@@ -219,10 +228,10 @@ class AutoReplyClient(discord.Client):
             if not rule.is_active:
                 continue
 
-            if rule.ignore_replies and message.reference is not None:
+            if self._should_ignore_reply_message(message, rule):
                 continue
 
-            if rule.ignore_mentions and message.mentions:
+            if self._should_ignore_mention_message(message, rule):
                 continue
 
             if self._check_match(message.content, rule):
@@ -291,8 +300,10 @@ class AutoReplyClient(discord.Client):
         if not content:
             return False
 
+        case_sensitive = self._is_rule_match_case_sensitive(rule)
+
         if rule.match_type == MatchType.PARTIAL:
-            if rule.case_sensitive:
+            if case_sensitive:
                 # 区分大小写
                 return any(keyword in content for keyword in rule.keywords)
             else:
@@ -300,7 +311,7 @@ class AutoReplyClient(discord.Client):
                 content_lower = content.lower()
                 return any(keyword.lower() in content_lower for keyword in rule.keywords)
         elif rule.match_type == MatchType.EXACT:
-            if rule.case_sensitive:
+            if case_sensitive:
                 # 区分大小写
                 return content in rule.keywords
             else:
@@ -308,10 +319,31 @@ class AutoReplyClient(discord.Client):
                 content_lower = content.lower()
                 return content_lower in [k.lower() for k in rule.keywords]
         elif rule.match_type == MatchType.REGEX:
-            flags = 0 if rule.case_sensitive else re.IGNORECASE
+            flags = 0 if case_sensitive else re.IGNORECASE
             return any(re.search(keyword, content, flags) for keyword in rule.keywords)
 
         return False
+
+    def _get_block_settings(self) -> Optional[BlockSettings]:
+        return getattr(self.discord_manager, "block_settings", None)
+
+    def _should_ignore_reply_message(self, message, rule: Rule) -> bool:
+        block_settings = self._get_block_settings()
+        if block_settings is not None:
+            return block_settings.should_ignore_reply_message(getattr(message, "reference", None))
+        return getattr(rule, "ignore_replies", False) and getattr(message, "reference", None) is not None
+
+    def _should_ignore_mention_message(self, message, rule: Rule) -> bool:
+        block_settings = self._get_block_settings()
+        if block_settings is not None:
+            return block_settings.should_ignore_mention_message(getattr(message, "mentions", []))
+        return getattr(rule, "ignore_mentions", False) and bool(getattr(message, "mentions", []))
+
+    def _is_rule_match_case_sensitive(self, rule: Rule) -> bool:
+        block_settings = self._get_block_settings()
+        if block_settings is not None:
+            return block_settings.case_sensitive
+        return getattr(rule, "case_sensitive", False)
 
     def _is_blocked_message(self, message) -> bool:
         block_settings = getattr(self.discord_manager, "block_settings", None)
@@ -568,6 +600,7 @@ class DiscordManager:
         # 消息去重跟踪 - 存储已回复的消息ID，避免重复回复
         self.replied_messages: Set[int] = set()
         self.max_replied_messages: int = 1000  # 最多跟踪1000条消息
+        self.rotation_lock: Optional[asyncio.Lock] = None
 
     def _get_available_accounts(self, channel_id: Optional[int] = None) -> List[Account]:
         return [
@@ -578,7 +611,12 @@ class DiscordManager:
     @staticmethod
     def _can_account_send_now(account: Account, current_time: Optional[float] = None) -> bool:
         current_time = time.time() if current_time is None else current_time
-        return account.rate_limit_until is None or current_time >= account.rate_limit_until
+        cooldown_until = getattr(account, "cooldown_until", None)
+        if cooldown_until is not None and current_time < cooldown_until:
+            return False
+        if account.rate_limit_until is not None and current_time < account.rate_limit_until:
+            return False
+        return True
 
     @staticmethod
     def _build_message_reference(message):
@@ -790,6 +828,17 @@ class DiscordManager:
         if not self.rotation_enabled:
             return False
 
+        if self.rotation_lock is None:
+            self.rotation_lock = asyncio.Lock()
+
+        async with self.rotation_lock:
+            return await self._send_rotated_reply_locked(message, reply_text, rule_name)
+
+    async def _send_rotated_reply_locked(self, message, reply_text: str, rule_name: str = "") -> bool:
+        """在轮换锁内发送回复，避免同一时刻多个账号同时发送"""
+        if not self.rotation_enabled:
+            return False
+
         # 检查这条消息是否已经被回复过
         if message.id in self.replied_messages:
             if self.log_callback:
@@ -837,10 +886,13 @@ class DiscordManager:
                 self._trim_replied_messages()
 
                 account.last_sent_time = current_time
+                if self.rotation_interval > 0:
+                    account.cooldown_until = current_time + self.rotation_interval
                 self.current_rotation_index = (account_index + 1) % len(available_accounts)
 
                 if self.log_callback:
-                    self.log_callback(f"✅ [{account.alias}] 轮换回复成功: '{reply_text[:50]}...'")
+                    cooldown_text = f"，进入 {self.rotation_interval} 秒冷却" if self.rotation_interval > 0 else ""
+                    self.log_callback(f"✅ [{account.alias}] 轮换回复成功{cooldown_text}: '{reply_text[:50]}...'")
 
                 return True
 
@@ -862,7 +914,7 @@ class DiscordManager:
                     self.log_callback(f"❌ [{account.alias}] 发送异常: {str(e)}")
 
         if self.log_callback:
-            self.log_callback("❌ 当前没有可立即发送的轮换账号")
+            self.log_callback("❌ 当前没有可立即发送的轮换账号，可能都在冷却或受限")
         return False
 
     async def revalidate_account(self, token: str) -> Tuple[bool, Optional[str]]:

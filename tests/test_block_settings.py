@@ -38,6 +38,12 @@ class BlockSettingsTests(unittest.TestCase):
         self.assertTrue(settings.should_block_message(account, content="hello", author_id="222"))
         self.assertFalse(settings.should_block_message(account, content="hello", author_id="333"))
 
+    def test_global_message_filters_default_to_ignoring_replies_and_mentions(self):
+        settings = BlockSettings()
+
+        self.assertTrue(settings.ignore_replies)
+        self.assertTrue(settings.ignore_mentions)
+
 
 class ConfigManagerBlockSettingsTests(unittest.TestCase):
     def test_saves_and_loads_block_settings(self):
@@ -58,6 +64,8 @@ class ConfigManagerBlockSettingsTests(unittest.TestCase):
                 blocked_user_ids=["1001"],
                 account_scope="selected",
                 account_tokens=["token-1"],
+                ignore_replies=False,
+                ignore_mentions=False,
                 case_sensitive=True,
             )
 
@@ -72,6 +80,8 @@ class ConfigManagerBlockSettingsTests(unittest.TestCase):
             self.assertEqual(loaded_block_settings.blocked_user_ids, ["1001"])
             self.assertEqual(loaded_block_settings.account_scope, "selected")
             self.assertEqual(loaded_block_settings.account_tokens, ["token-1"])
+            self.assertFalse(loaded_block_settings.ignore_replies)
+            self.assertFalse(loaded_block_settings.ignore_mentions)
             self.assertTrue(loaded_block_settings.case_sensitive)
 
     def test_migrates_legacy_rule_exclude_keywords_into_block_settings(self):
@@ -99,6 +109,33 @@ class ConfigManagerBlockSettingsTests(unittest.TestCase):
             self.assertEqual(loaded_rules[0].exclude_keywords, [])
             self.assertEqual(loaded_block_settings.blocked_keywords, ["http", "discord.gg"])
             self.assertEqual(loaded_block_settings.account_scope, "all")
+
+    def test_migrates_uniform_legacy_rule_filters_into_block_settings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = f"{temp_dir}/config.json"
+            payload = {
+                "accounts": [{"token": "token-1", "rule_ids": ["rule-1"]}],
+                "rules": [
+                    {
+                        "id": "rule-1",
+                        "keywords": ["hello"],
+                        "reply": "world",
+                        "match_type": "partial",
+                        "ignore_replies": False,
+                        "ignore_mentions": False,
+                        "case_sensitive": True,
+                    }
+                ],
+            }
+            with open(config_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+            manager = ConfigManager(config_dir=temp_dir)
+            _, _, loaded_block_settings = manager.load_config()
+
+            self.assertFalse(loaded_block_settings.ignore_replies)
+            self.assertFalse(loaded_block_settings.ignore_mentions)
+            self.assertTrue(loaded_block_settings.case_sensitive)
 
 
 class AccountChannelScopeTests(unittest.TestCase):
