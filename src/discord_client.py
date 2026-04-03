@@ -348,27 +348,28 @@ class AutoReplyClient(discord.Client):
         if not content:
             return False
 
+        normalized_content = content.strip()
         case_sensitive = self._is_rule_match_case_sensitive(rule)
 
         if rule.match_type == MatchType.PARTIAL:
             if case_sensitive:
                 # 区分大小写
-                return any(keyword in content for keyword in rule.keywords)
+                return any(keyword in normalized_content for keyword in rule.keywords)
             else:
                 # 不区分大小写
-                content_lower = content.lower()
+                content_lower = normalized_content.lower()
                 return any(keyword.lower() in content_lower for keyword in rule.keywords)
         elif rule.match_type == MatchType.EXACT:
             if case_sensitive:
                 # 区分大小写
-                return content in rule.keywords
+                return normalized_content in [keyword.strip() for keyword in rule.keywords]
             else:
                 # 不区分大小写
-                content_lower = content.lower()
-                return content_lower in [k.lower() for k in rule.keywords]
+                content_lower = normalized_content.lower()
+                return content_lower in [k.strip().lower() for k in rule.keywords]
         elif rule.match_type == MatchType.REGEX:
             flags = 0 if case_sensitive else re.IGNORECASE
-            return any(re.search(keyword, content, flags) for keyword in rule.keywords)
+            return any(re.search(keyword, normalized_content, flags) for keyword in rule.keywords)
 
         return False
 
@@ -936,7 +937,7 @@ class DiscordManager:
 
         for acc in self.accounts:
             if acc.is_active and acc.is_valid:
-                rules = [r for r in self.rules if r.id in acc.rule_ids]
+                rules = [r for r in self.rules if self._rule_matches_account(acc, r)]
                 client = AutoReplyClient(acc, rules, self.log_callback, self)
                 self.clients.append(client)
                 active_clients.append(client)

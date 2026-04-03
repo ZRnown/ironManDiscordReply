@@ -4,7 +4,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 import discord
-from src.discord_client import Account, DiscordManager
+from src.discord_client import Account, DiscordManager, MatchType, Rule
 
 
 class FakeClient:
@@ -128,6 +128,39 @@ class DiscordManagerStartupTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.manager.is_running)
         self.assertEqual(len(self.manager.client_tasks), len(self.manager.accounts))
         self.assertLessEqual(FakeClient.max_active_startups, self.manager.max_parallel_starts)
+
+    async def test_start_all_clients_treats_empty_rule_ids_as_all_rules(self):
+        self.manager.accounts = [
+            Account(
+                token="token-1",
+                is_active=True,
+                is_valid=True,
+                user_info={"name": "user-1", "discriminator": "0000"},
+                rule_ids=[],
+            )
+        ]
+        self.manager.rules = [
+            Rule(
+                id="rule-1",
+                keywords=["123"],
+                reply="r1",
+                match_type=MatchType.PARTIAL,
+                target_channels=[],
+            ),
+            Rule(
+                id="rule-2",
+                keywords=["abc"],
+                reply="r2",
+                match_type=MatchType.EXACT,
+                target_channels=[],
+            ),
+        ]
+
+        with patch("src.discord_client.AutoReplyClient", FakeClient):
+            await self.manager.start_all_clients()
+
+        self.assertEqual(len(self.manager.clients), 1)
+        self.assertEqual([rule.id for rule in self.manager.clients[0].rules], ["rule-1", "rule-2"])
 
     async def test_stop_all_clients_clears_tracked_tasks(self):
         with patch("src.discord_client.AutoReplyClient", FakeClient):

@@ -128,6 +128,37 @@ class MainWindowAccountCooldownTests(GuiTestCase):
 
         self.assertEqual(self.window.accounts_table.item(0, 4).text(), "可用")
 
+    def test_accounts_table_shows_empty_rule_ids_as_all_rules(self):
+        self.window.discord_manager.rules = [
+            Rule(
+                id="rule-1",
+                keywords=["hello"],
+                reply="world",
+                match_type=MatchType.PARTIAL,
+                target_channels=[],
+            ),
+            Rule(
+                id="rule-2",
+                keywords=["123"],
+                reply="456",
+                match_type=MatchType.PARTIAL,
+                target_channels=[],
+            ),
+        ]
+        self.window.discord_manager.accounts = [
+            Account(
+                token="token-1",
+                is_active=True,
+                is_valid=True,
+                user_info={"name": "sender", "discriminator": "0001"},
+                rule_ids=[],
+            ),
+        ]
+
+        self.window.update_accounts_list()
+
+        self.assertEqual(self.window.accounts_table.item(0, 2).text(), "全部(2)")
+
 
 class MainWindowRuleSelectionTests(GuiTestCase):
     def setUp(self):

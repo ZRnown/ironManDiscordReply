@@ -183,6 +183,26 @@ class AutoReplyClientMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["recent_replies"][0]["target"], "Alice")
         self.assertEqual(status["recent_replies"][0]["link"], "https://discord.com/channels/456/123/1001")
 
+    async def test_partial_match_handles_numeric_substring_keywords(self):
+        self.rule.keywords = ["123", "1235"]
+        self.rule.match_type = MatchType.PARTIAL
+        message = FakeInboundMessage(content="1234 567", author_name="Alice")
+
+        await self.client.on_message(message)
+
+        self.assertEqual(len(message.reply_calls), 1)
+        self.assertEqual(message.reply_calls[0]["content"], "hi there")
+
+    async def test_exact_match_ignores_surrounding_whitespace(self):
+        self.rule.keywords = ["exact value"]
+        self.rule.match_type = MatchType.EXACT
+        message = FakeInboundMessage(content="  exact value  ", author_name="Alice")
+
+        await self.client.on_message(message)
+
+        self.assertEqual(len(message.reply_calls), 1)
+        self.assertEqual(message.reply_calls[0]["content"], "hi there")
+
     async def test_rule_can_request_two_accounts_to_reply(self):
         secondary_account = Account(
             token="token-2",

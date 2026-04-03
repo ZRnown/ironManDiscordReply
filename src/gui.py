@@ -996,6 +996,7 @@ class AccountEditDialog(QDialog):
         self.setWindowTitle(f"编辑账号 - {self.account.alias}")
         self.setModal(True)
         self.resize(640, 680)
+        self.default_all_rules_mode = not self.account.rule_ids
 
         layout = QVBoxLayout(self)
 
@@ -1048,6 +1049,11 @@ class AccountEditDialog(QDialog):
         rules_title.setStyleSheet("font-weight: bold; font-size: 12px;")
         layout.addWidget(rules_title)
 
+        rules_hint = QLabel("当前如果没有单独指定规则，就默认使用全部关键词。只有勾掉一部分后，才会按指定规则运行。")
+        rules_hint.setStyleSheet("color: gray;")
+        rules_hint.setWordWrap(True)
+        layout.addWidget(rules_hint)
+
         range_layout = QHBoxLayout()
         range_layout.addWidget(QLabel("按序号勾选:"))
         self.rule_range_input = QLineEdit()
@@ -1073,7 +1079,7 @@ class AccountEditDialog(QDialog):
             keyword_preview = rule.keywords[0] if rule.keywords else "无关键词"
             reply_preview = rule.reply[:30] + ("..." if len(rule.reply) > 30 else "")
             checkbox = QCheckBox(f"{index}. {keyword_preview} -> {reply_preview}")
-            checkbox.setChecked(rule.id in self.account.rule_ids)
+            checkbox.setChecked(self.default_all_rules_mode or rule.id in self.account.rule_ids)
             checkbox.setToolTip(
                 f"序号: {index}\n关键词: {', '.join(rule.keywords)}\n回复: {rule.reply}"
             )
@@ -1125,13 +1131,18 @@ class AccountEditDialog(QDialog):
     def update_stats_label(self):
         selected_count = sum(1 for _, checkbox in self.checkboxes if checkbox.isChecked())
         total_count = len(self.checkboxes)
+        if total_count > 0 and selected_count == total_count and self.default_all_rules_mode:
+            self.stats_label.setText(f"当前默认使用全部规则（{total_count} 条）")
+            return
         self.stats_label.setText(f"已选择 {selected_count}/{total_count} 个规则")
 
     def select_all_rules(self):
+        self.default_all_rules_mode = False
         for _, checkbox in self.checkboxes:
             checkbox.setChecked(True)
 
     def clear_all_rules(self):
+        self.default_all_rules_mode = False
         for _, checkbox in self.checkboxes:
             checkbox.setChecked(False)
 
@@ -1159,13 +1170,17 @@ class AccountEditDialog(QDialog):
 
         current_states = [checkbox.isChecked() for _, checkbox in self.checkboxes]
         updated_states = apply_checked_indices(current_states, row_indices, checked=checked)
+        self.default_all_rules_mode = False
         for state, (_, checkbox) in zip(updated_states, self.checkboxes):
             checkbox.setChecked(state)
 
         self.update_stats_label()
 
     def get_selected_rule_ids(self):
-        return [rule_id for rule_id, checkbox in self.checkboxes if checkbox.isChecked()]
+        selected_rule_ids = [rule_id for rule_id, checkbox in self.checkboxes if checkbox.isChecked()]
+        if self.default_all_rules_mode and len(selected_rule_ids) == len(self.checkboxes):
+            return []
+        return selected_rule_ids
 
     def get_account_data(self):
         return {
@@ -1848,15 +1863,18 @@ class MainWindow(QMainWindow):
                 self.accounts_table.setItem(row, 1, token_status_item)
 
                 # 应用规则（显示关联的规则数量）
-                applied_rules = len(account.rule_ids)
                 total_rules = len(self.discord_manager.rules)
-                rules_text = f"{applied_rules}/{total_rules}"
+                uses_all_rules = total_rules > 0 and not account.rule_ids
+                applied_rules = total_rules if uses_all_rules else len(account.rule_ids)
+                rules_text = f"全部({total_rules})" if uses_all_rules else f"{applied_rules}/{total_rules}"
                 rules_item = QTableWidgetItem(rules_text)
                 rules_item.setFlags(rules_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if applied_rules > 0:
                     rules_item.setBackground(QColor(173, 216, 230))  # 浅蓝色
                 else:
                     rules_item.setBackground(QColor(240, 240, 240))  # 浅灰色
+                if uses_all_rules:
+                    rules_item.setToolTip("当前没有单独指定规则，默认使用全部规则")
                 rules_item.setData(Qt.ItemDataRole.UserRole, account.rule_ids)  # 存储规则ID列表
                 self.accounts_table.setItem(row, 2, rules_item)
 
