@@ -638,7 +638,7 @@ class DiscordManager:
         self.rule_reply_order: List[Tuple[int, str]] = []
         self.max_rule_reply_records: int = 2000
         self.recent_replies: List[Dict] = []
-        self.max_recent_replies: int = 200
+        self.max_recent_replies: int = 1000
 
     def _rule_matches_account(self, account: Account, rule: Rule) -> bool:
         return not account.rule_ids or rule.id in account.rule_ids
@@ -1169,5 +1169,5 @@ class DiscordManager:
             ],
             "rules_count": len(self.rules),
             "active_rules": len([r for r in self.rules if r.is_active]),
-            "recent_replies": list(reversed(self.recent_replies[-20:])),
+            "recent_replies": list(reversed(self.recent_replies)),
         }

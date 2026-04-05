@@ -13,8 +13,8 @@ from PySide6.QtWidgets import (
     QHeaderView, QMessageBox, QFileDialog, QSplitter, QProgressBar,
     QDialog, QMenu, QScrollArea, QAbstractItemView
 )
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QItemSelectionModel
-from PySide6.QtGui import QFont, QIcon, QColor
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QItemSelectionModel, QUrl
+from PySide6.QtGui import QFont, QIcon, QColor, QDesktopServices
 
 # 添加src目录到Python路径（确保打包后能找到模块）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -506,6 +506,11 @@ class RuleDialog(QDialog):
         type_layout_row.addStretch()
 
         layout.addLayout(type_layout_row)
+
+        match_hint = QLabel("部分匹配会在整条消息里找关键词，只要包含就会触发；多关键词之间是“或”关系，不是“且”关系。")
+        match_hint.setStyleSheet("color: gray;")
+        match_hint.setWordWrap(True)
+        layout.addWidget(match_hint)
 
         # 激活状态
         self.active_checkbox = QCheckBox("启用规则")
@@ -1382,6 +1387,9 @@ class MainWindow(QMainWindow):
 
         self.worker_thread = None
         self._updating_accounts_table = False
+        self.reply_history_page_size = 20
+        self.reply_history_page = 0
+        self.reply_history_items = []
 
         self.init_ui()
         self.load_config()
@@ -1692,7 +1700,27 @@ class MainWindow(QMainWindow):
         history_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         self.reply_history_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.reply_history_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.reply_history_table.itemDoubleClicked.connect(self.handle_reply_history_item_double_clicked)
         history_layout.addWidget(self.reply_history_table)
+
+        history_controls = QHBoxLayout()
+        self.open_reply_link_btn = QPushButton("打开选中链接")
+        self.open_reply_link_btn.clicked.connect(self.open_selected_reply_link)
+        history_controls.addWidget(self.open_reply_link_btn)
+
+        history_controls.addStretch()
+
+        self.reply_history_prev_btn = QPushButton("上一页")
+        self.reply_history_prev_btn.clicked.connect(self.show_previous_reply_history_page)
+        history_controls.addWidget(self.reply_history_prev_btn)
+
+        self.reply_history_page_label = QLabel("第 1/1 页")
+        history_controls.addWidget(self.reply_history_page_label)
+
+        self.reply_history_next_btn = QPushButton("下一页")
+        self.reply_history_next_btn.clicked.connect(self.show_next_reply_history_page)
+        history_controls.addWidget(self.reply_history_next_btn)
+        history_layout.addLayout(history_controls)
         layout.addWidget(history_group)
 
         # 规则统计
@@ -2252,16 +2280,7 @@ class MainWindow(QMainWindow):
                 if not current_cooldown or current_cooldown.text() != cooldown_text:
                     self.status_accounts_table.setItem(i, 4, QTableWidgetItem(cooldown_text))
 
-            recent_replies = status.get("recent_replies", [])
-            self.reply_history_table.setRowCount(len(recent_replies))
-            for row, item_data in enumerate(recent_replies):
-                self.reply_history_table.setItem(row, 0, QTableWidgetItem(item_data.get("time_text", "")))
-                self.reply_history_table.setItem(row, 1, QTableWidgetItem(item_data.get("account_alias", "")))
-                self.reply_history_table.setItem(row, 2, QTableWidgetItem(item_data.get("keyword", "")))
-                self.reply_history_table.setItem(row, 3, QTableWidgetItem(item_data.get("target", "")))
-                link_item = QTableWidgetItem(item_data.get("link", ""))
-                link_item.setToolTip(item_data.get("link", ""))
-                self.reply_history_table.setItem(row, 4, link_item)
+            self.update_reply_history_table(status.get("recent_replies", []))
 
             # 更新规则统计
             rules_text = f"总规则数: {status['rules_count']} | 激活规则数: {status['active_rules']}"
@@ -2271,6 +2290,75 @@ class MainWindow(QMainWindow):
         except Exception as e:
             # 静默处理状态更新错误，避免影响用户体验
             print(f"状态更新错误: {e}")
+
+    def update_reply_history_table(self, reply_history_items):
+        self.reply_history_items = list(reply_history_items or [])
+        total_items = len(self.reply_history_items)
+        total_pages = max(1, (total_items + self.reply_history_page_size - 1) // self.reply_history_page_size)
+        if self.reply_history_page >= total_pages:
+            self.reply_history_page = total_pages - 1
+
+        start_index = self.reply_history_page * self.reply_history_page_size
+        end_index = start_index + self.reply_history_page_size
+        visible_items = self.reply_history_items[start_index:end_index]
+
+        self.reply_history_table.setRowCount(len(visible_items))
+        for row, item_data in enumerate(visible_items):
+            self.reply_history_table.setItem(row, 0, QTableWidgetItem(item_data.get("time_text", "")))
+            self.reply_history_table.setItem(row, 1, QTableWidgetItem(item_data.get("account_alias", "")))
+            self.reply_history_table.setItem(row, 2, QTableWidgetItem(item_data.get("keyword", "")))
+            self.reply_history_table.setItem(row, 3, QTableWidgetItem(item_data.get("target", "")))
+
+            link_text = item_data.get("link", "")
+            link_item = QTableWidgetItem(link_text)
+            link_item.setToolTip("双击或选中后点击“打开选中链接”")
+            link_item.setForeground(QColor(0, 102, 204))
+            link_item.setData(Qt.ItemDataRole.UserRole, link_text)
+            self.reply_history_table.setItem(row, 4, link_item)
+
+        self.reply_history_page_label.setText(f"第 {self.reply_history_page + 1}/{total_pages} 页")
+        self.reply_history_prev_btn.setEnabled(self.reply_history_page > 0)
+        self.reply_history_next_btn.setEnabled(self.reply_history_page + 1 < total_pages)
+        self.open_reply_link_btn.setEnabled(bool(visible_items))
+
+    def show_previous_reply_history_page(self):
+        if self.reply_history_page <= 0:
+            return
+        self.reply_history_page -= 1
+        self.update_reply_history_table(self.reply_history_items)
+
+    def show_next_reply_history_page(self):
+        total_items = len(self.reply_history_items)
+        total_pages = max(1, (total_items + self.reply_history_page_size - 1) // self.reply_history_page_size)
+        if self.reply_history_page + 1 >= total_pages:
+            return
+        self.reply_history_page += 1
+        self.update_reply_history_table(self.reply_history_items)
+
+    def handle_reply_history_item_double_clicked(self, item):
+        if item is None or item.column() != 4:
+            return
+        self.open_reply_history_link_for_row(item.row())
+
+    def open_selected_reply_link(self):
+        current_row = self.reply_history_table.currentRow()
+        if current_row < 0:
+            QMessageBox.information(self, "提示", "请先选中一条回复记录")
+            return
+        self.open_reply_history_link_for_row(current_row)
+
+    def open_reply_history_link_for_row(self, row: int):
+        link_item = self.reply_history_table.item(row, 4)
+        if link_item is None:
+            return
+
+        link_text = (link_item.data(Qt.ItemDataRole.UserRole) or link_item.text() or "").strip()
+        if not link_text:
+            QMessageBox.information(self, "提示", "这条记录没有可打开的链接")
+            return
+
+        if not QDesktopServices.openUrl(QUrl(link_text)):
+            QMessageBox.warning(self, "打开失败", "系统没有成功打开这个链接")
 
     def show_accounts_context_menu(self, position):
         """显示账号右键菜单"""

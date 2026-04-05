@@ -160,6 +160,59 @@ class MainWindowAccountCooldownTests(GuiTestCase):
         self.assertEqual(self.window.accounts_table.item(0, 2).text(), "全部(2)")
 
 
+class MainWindowReplyHistoryTests(GuiTestCase):
+    def setUp(self):
+        with patch.object(MainWindow, "load_config", autospec=True):
+            self.window = MainWindow()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+
+    def test_reply_history_supports_pagination(self):
+        self.window.discord_manager.recent_replies = [
+            {
+                "time_text": f"10:{index:02d}",
+                "account_alias": "sender#0001",
+                "keyword": f"keyword-{index}",
+                "target": "Alice",
+                "link": f"https://discord.com/channels/1/2/{index}",
+            }
+            for index in range(25)
+        ]
+
+        self.window.update_status()
+
+        self.assertEqual(self.window.reply_history_table.rowCount(), 20)
+        self.assertEqual(self.window.reply_history_page_label.text(), "第 1/2 页")
+        self.assertEqual(self.window.reply_history_table.item(0, 2).text(), "keyword-24")
+
+        self.window.show_next_reply_history_page()
+
+        self.assertEqual(self.window.reply_history_table.rowCount(), 5)
+        self.assertEqual(self.window.reply_history_page_label.text(), "第 2/2 页")
+        self.assertEqual(self.window.reply_history_table.item(0, 2).text(), "keyword-4")
+
+    def test_open_selected_reply_link_uses_desktop_services(self):
+        self.window.discord_manager.recent_replies = [
+            {
+                "time_text": "10:00",
+                "account_alias": "sender#0001",
+                "keyword": "keyword-1",
+                "target": "Alice",
+                "link": "https://discord.com/channels/1/2/3",
+            }
+        ]
+        self.window.update_status()
+        self.window.reply_history_table.setCurrentCell(0, 4)
+
+        with patch("src.gui.QDesktopServices.openUrl", return_value=True) as open_mock:
+            self.window.open_selected_reply_link()
+
+        self.assertEqual(open_mock.call_count, 1)
+        self.assertEqual(open_mock.call_args[0][0].toString(), "https://discord.com/channels/1/2/3")
+
+
 class MainWindowRuleSelectionTests(GuiTestCase):
     def setUp(self):
         with patch.object(MainWindow, "load_config", autospec=True):
