@@ -180,23 +180,45 @@ class AutoReplyClientMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(status["recent_replies"]), 1)
         self.assertEqual(status["recent_replies"][0]["account_alias"], "sender#0001")
         self.assertEqual(status["recent_replies"][0]["keyword"], "hello")
-        self.assertEqual(status["recent_replies"][0]["target"], "Alice")
-        self.assertEqual(status["recent_replies"][0]["link"], "https://discord.com/channels/456/123/1001")
+        self.assertEqual(status["recent_replies"][0]["customer_message"], "hello there")
+        self.assertEqual(status["recent_replies"][0]["reply_content"], "hi there")
 
-    async def test_partial_match_handles_numeric_substring_keywords(self):
+    async def test_partial_match_requires_whole_keyword_boundaries(self):
         self.rule.keywords = ["123", "1235"]
         self.rule.match_type = MatchType.PARTIAL
         message = FakeInboundMessage(content="1234 567", author_name="Alice")
 
         await self.client.on_message(message)
 
+        self.assertEqual(len(message.reply_calls), 0)
+
+    async def test_partial_match_uses_whole_phrase_not_inner_substring(self):
+        self.rule.keywords = ["ric", "Eric Emmanuel Shorts"]
+        self.rule.match_type = MatchType.PARTIAL
+        message = FakeInboundMessage(content="Eric Emmanuel Shorts", author_name="Alice")
+
+        await self.client.on_message(message)
+
         self.assertEqual(len(message.reply_calls), 1)
         self.assertEqual(message.reply_calls[0]["content"], "hi there")
+        status = self.manager.get_status()
+        self.assertEqual(status["recent_replies"][0]["keyword"], "Eric Emmanuel Shorts")
 
     async def test_exact_match_ignores_surrounding_whitespace(self):
         self.rule.keywords = ["exact value"]
         self.rule.match_type = MatchType.EXACT
         message = FakeInboundMessage(content="  exact value  ", author_name="Alice")
+
+        await self.client.on_message(message)
+
+        self.assertEqual(len(message.reply_calls), 1)
+        self.assertEqual(message.reply_calls[0]["content"], "hi there")
+
+    async def test_matching_is_case_insensitive_even_if_rule_requests_sensitive(self):
+        self.rule.keywords = ["Shorts"]
+        self.rule.match_type = MatchType.PARTIAL
+        self.rule.case_sensitive = True
+        message = FakeInboundMessage(content="shorts", author_name="Alice")
 
         await self.client.on_message(message)
 

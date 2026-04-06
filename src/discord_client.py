@@ -1,9 +1,11 @@
 import asyncio
 import discord
+import hashlib
 import re
 import random
 import time
 import logging
+from functools import lru_cache
 from typing import List, Dict, Optional, Tuple, Set
 from dataclasses import dataclass, field
 from enum import Enum
@@ -15,6 +17,16 @@ class MatchType(Enum):
     PARTIAL = "partial"
     EXACT = "exact"
     REGEX = "regex"
+
+
+MATCH_RELEVANT_RULE_FIELDS = {
+    "keywords",
+    "match_type",
+    "is_active",
+    "ignore_replies",
+    "ignore_mentions",
+    "case_sensitive",
+}
 
 
 @dataclass
@@ -109,6 +121,13 @@ class Rule:
     case_sensitive: bool = False  # 是否区分大小写，False表示不区分大小写
     exclude_keywords: List[str] = field(default_factory=list)  # 触发后不回复的过滤关键词
     reply_account_count: int = 1  # 命中后由几个账号回复，支持 1-3
+    sync_source: str = ""  # 跟随文件同步时标记来源
+    _match_revision: int = field(default=0, init=False, repr=False, compare=False)
+
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+        if name in MATCH_RELEVANT_RULE_FIELDS:
+            object.__setattr__(self, "_match_revision", getattr(self, "_match_revision", 0) + 1)
 
     def __post_init__(self):
         self.target_channels = Account._normalize_channel_ids(self.target_channels)
@@ -136,6 +155,7 @@ class BlockSettings:
         self.blocked_user_ids = self._normalize_values(self.blocked_user_ids)
         self.blocked_channel_ids = Account._normalize_channel_ids(self.blocked_channel_ids)
         self.account_tokens = self._normalize_values(self.account_tokens)
+        self.case_sensitive = False
         if self.account_scope not in {"all", "selected"}:
             self.account_scope = "all"
 
@@ -161,9 +181,6 @@ class BlockSettings:
     def blocks_content(self, content: str) -> bool:
         if not content or not self.blocked_keywords:
             return False
-
-        if self.case_sensitive:
-            return any(keyword in content for keyword in self.blocked_keywords)
 
         content_lower = content.lower()
         return any(keyword.lower() in content_lower for keyword in self.blocked_keywords)
@@ -222,6 +239,212 @@ def _build_reply_log_message(account_alias: str, message) -> str:
     return f"{account_alias} 回复了 {_get_message_author_label(message)}"
 
 
+def _normalize_match_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
+def _is_ascii_word_char(character: str) -> bool:
+    if not character:
+        return False
+
+    code = ord(character)
+    return (
+        48 <= code <= 57 or
+        65 <= code <= 90 or
+        97 <= code <= 122
+    )
+
+
+def _has_keyword_boundaries(text: str, start_index: int, end_index: int) -> bool:
+    previous_character = text[start_index - 1] if start_index > 0 else ""
+    next_character = text[end_index] if end_index < len(text) else ""
+    return not _is_ascii_word_char(previous_character) and not _is_ascii_word_char(next_character)
+
+
+@lru_cache(maxsize=4096)
+def _compile_partial_keyword_pattern(keyword: str):
+    normalized_keyword = _normalize_match_text(keyword)
+    if not normalized_keyword:
+        return None
+
+    escaped_keyword = re.escape(normalized_keyword).replace(r"\ ", r"\s+")
+    if re.search(r"[A-Za-z0-9]", normalized_keyword):
+        pattern = rf"(?<![A-Za-z0-9]){escaped_keyword}(?![A-Za-z0-9])"
+    else:
+        pattern = escaped_keyword
+    return re.compile(pattern, re.IGNORECASE)
+
+
+class LiteralKeywordAutomaton:
+    def __init__(self):
+        self.nodes = [{"children": {}, "fail": 0, "outputs": []}]
+
+    def add(self, keyword: str, payload):
+        state = 0
+        for character in keyword:
+            children = self.nodes[state]["children"]
+            next_state = children.get(character)
+            if next_state is None:
+                next_state = len(self.nodes)
+                children[character] = next_state
+                self.nodes.append({"children": {}, "fail": 0, "outputs": []})
+            state = next_state
+        self.nodes[state]["outputs"].append(payload)
+
+    def build(self):
+        queue = list(self.nodes[0]["children"].values())
+        queue_index = 0
+
+        while queue_index < len(queue):
+            state = queue[queue_index]
+            queue_index += 1
+
+            for character, next_state in self.nodes[state]["children"].items():
+                queue.append(next_state)
+                fail_state = self.nodes[state]["fail"]
+
+                while fail_state and character not in self.nodes[fail_state]["children"]:
+                    fail_state = self.nodes[fail_state]["fail"]
+
+                self.nodes[next_state]["fail"] = self.nodes[fail_state]["children"].get(character, 0)
+                self.nodes[next_state]["outputs"].extend(
+                    self.nodes[self.nodes[next_state]["fail"]]["outputs"]
+                )
+
+    def iter_matches(self, text: str):
+        state = 0
+
+        for character_index, character in enumerate(text):
+            while state and character not in self.nodes[state]["children"]:
+                state = self.nodes[state]["fail"]
+
+            state = self.nodes[state]["children"].get(character, 0)
+            outputs = self.nodes[state]["outputs"]
+            if outputs:
+                for payload in outputs:
+                    yield character_index, payload
+
+
+class RuleSetMatcher:
+    def __init__(self, rules: List[Rule]):
+        self.rules = list(rules)
+        self.partial_automaton = None
+        self.exact_keyword_map: Dict[str, List[Tuple[str, int, int, str]]] = {}
+        self.regex_keyword_entries: List[Tuple[str, int, int, str, Optional[re.Pattern]]] = []
+        self._build()
+
+    def _build(self):
+        partial_automaton = LiteralKeywordAutomaton()
+        partial_keyword_count = 0
+
+        for rule_index, rule in enumerate(self.rules):
+            if not rule.is_active:
+                continue
+
+            for keyword_index, keyword in enumerate(rule.keywords):
+                normalized_keyword = _normalize_match_text(keyword)
+                if not normalized_keyword:
+                    continue
+
+                if rule.match_type == MatchType.PARTIAL:
+                    partial_automaton.add(
+                        normalized_keyword.lower(),
+                        (
+                            rule.id,
+                            rule_index,
+                            keyword_index,
+                            keyword,
+                            len(normalized_keyword),
+                            any(_is_ascii_word_char(character) for character in normalized_keyword),
+                        ),
+                    )
+                    partial_keyword_count += 1
+                elif rule.match_type == MatchType.EXACT:
+                    self.exact_keyword_map.setdefault(normalized_keyword.lower(), []).append(
+                        (rule.id, rule_index, keyword_index, keyword)
+                    )
+                elif rule.match_type == MatchType.REGEX:
+                    try:
+                        compiled_pattern = re.compile(keyword, re.IGNORECASE)
+                    except re.error:
+                        compiled_pattern = None
+                    self.regex_keyword_entries.append(
+                        (rule.id, rule_index, keyword_index, keyword, compiled_pattern)
+                    )
+
+        if partial_keyword_count > 0:
+            partial_automaton.build()
+            self.partial_automaton = partial_automaton
+
+    @staticmethod
+    def _update_best_match(
+        matched_keywords: Dict[str, str],
+        matched_ranks: Dict[str, Tuple[int, int]],
+        rule_id: str,
+        rule_index: int,
+        keyword_index: int,
+        keyword: str,
+    ):
+        new_rank = (rule_index, keyword_index)
+        current_rank = matched_ranks.get(rule_id)
+        if current_rank is None or new_rank < current_rank:
+            matched_ranks[rule_id] = new_rank
+            matched_keywords[rule_id] = keyword
+
+    def match_content(self, content: str) -> Dict[str, str]:
+        if not content:
+            return {}
+
+        normalized_content = _normalize_match_text(content)
+        if not normalized_content:
+            return {}
+
+        normalized_lower_content = normalized_content.lower()
+        matched_keywords: Dict[str, str] = {}
+        matched_ranks: Dict[str, Tuple[int, int]] = {}
+
+        if self.partial_automaton is not None:
+            for end_index, payload in self.partial_automaton.iter_matches(normalized_lower_content):
+                rule_id, rule_index, keyword_index, keyword, keyword_length, requires_boundary = payload
+                start_index = end_index - keyword_length + 1
+                if requires_boundary and not _has_keyword_boundaries(normalized_lower_content, start_index, end_index + 1):
+                    continue
+
+                self._update_best_match(
+                    matched_keywords,
+                    matched_ranks,
+                    rule_id,
+                    rule_index,
+                    keyword_index,
+                    keyword,
+                )
+
+        for rule_id, rule_index, keyword_index, keyword in self.exact_keyword_map.get(normalized_lower_content, []):
+            self._update_best_match(
+                matched_keywords,
+                matched_ranks,
+                rule_id,
+                rule_index,
+                keyword_index,
+                keyword,
+            )
+
+        for rule_id, rule_index, keyword_index, keyword, compiled_pattern in self.regex_keyword_entries:
+            if compiled_pattern is None or compiled_pattern.search(normalized_content) is None:
+                continue
+
+            self._update_best_match(
+                matched_keywords,
+                matched_ranks,
+                rule_id,
+                rule_index,
+                keyword_index,
+                keyword,
+            )
+
+        return matched_keywords
+
+
 class AutoReplyClient(discord.Client):
     def __init__(self, account: Account, rules: List[Rule], log_callback=None, discord_manager=None, *args, **kwargs):
         # 修正: discord.py-self 不需要也不支持 intents 参数
@@ -235,6 +458,8 @@ class AutoReplyClient(discord.Client):
         self.discord_manager = discord_manager
         self.startup_complete = asyncio.Event()
         self.startup_error: Optional[str] = None
+        self.local_rule_matcher: Optional[RuleSetMatcher] = None
+        self.local_rule_signature = None
         if self.discord_manager is not None and getattr(self.discord_manager, "log_callback", None) is None and log_callback is not None:
             self.discord_manager.log_callback = log_callback
 
@@ -293,17 +518,29 @@ class AutoReplyClient(discord.Client):
         if not self.account.allows_channel(getattr(message.channel, "id", None)):
             return
 
+        block_settings = self._get_block_settings()
+        if block_settings is not None:
+            if block_settings.should_ignore_reply_message(getattr(message, "reference", None)):
+                return
+            if block_settings.should_ignore_mention_message(getattr(message, "mentions", [])):
+                return
+
+        matched_keywords = self._get_matched_keywords_for_message(message)
+        if not matched_keywords:
+            return
+
         for rule in self.rules:
             if not rule.is_active:
                 continue
 
-            if self._should_ignore_reply_message(message, rule):
+            if block_settings is None and self._should_ignore_reply_message(message, rule):
                 continue
 
-            if self._should_ignore_mention_message(message, rule):
+            if block_settings is None and self._should_ignore_mention_message(message, rule):
                 continue
 
-            if self._check_match(message.content, rule):
+            matched_keyword = matched_keywords.get(rule.id)
+            if matched_keyword is not None:
                 if self._is_blocked_message(message):
                     break
 
@@ -316,12 +553,13 @@ class AutoReplyClient(discord.Client):
                         await self.discord_manager.send_rotated_reply(
                             message,
                             rule.reply,
-                            rule.keywords[0] if rule.keywords else "",
+                            matched_keyword,
                         )
                     elif self.discord_manager:
                         await self.discord_manager.send_rule_replies(
                             message,
                             rule,
+                            matched_keyword=matched_keyword,
                             preferred_account=self.account,
                             preferred_client=self,
                         )
@@ -343,35 +581,35 @@ class AutoReplyClient(discord.Client):
 
                 break
 
-    def _check_match(self, content: str, rule: Rule) -> bool:
+    def _build_local_rule_signature(self):
+        return tuple((id(rule), getattr(rule, "_match_revision", 0)) for rule in self.rules)
+
+    def _get_local_rule_matcher(self) -> RuleSetMatcher:
+        current_signature = self._build_local_rule_signature()
+        if self.local_rule_matcher is None or current_signature != self.local_rule_signature:
+            self.local_rule_matcher = RuleSetMatcher(self.rules)
+            self.local_rule_signature = current_signature
+        return self.local_rule_matcher
+
+    def _get_matched_keywords_for_message(self, message) -> Dict[str, str]:
+        content = getattr(message, "content", "") or ""
+        if not content or not self.rules:
+            return {}
+
+        if self.discord_manager is not None and getattr(self.discord_manager, "rules", None):
+            return self.discord_manager.get_message_rule_matches(message, content)
+
+        return self._get_local_rule_matcher().match_content(content)
+
+    def _find_matched_keyword(self, content: str, rule: Rule) -> Optional[str]:
         """检查消息内容是否匹配规则"""
-        if not content:
-            return False
+        if not content or rule is None:
+            return None
 
-        normalized_content = content.strip()
-        case_sensitive = self._is_rule_match_case_sensitive(rule)
+        return self._get_local_rule_matcher().match_content(content).get(rule.id)
 
-        if rule.match_type == MatchType.PARTIAL:
-            if case_sensitive:
-                # 区分大小写
-                return any(keyword in normalized_content for keyword in rule.keywords)
-            else:
-                # 不区分大小写
-                content_lower = normalized_content.lower()
-                return any(keyword.lower() in content_lower for keyword in rule.keywords)
-        elif rule.match_type == MatchType.EXACT:
-            if case_sensitive:
-                # 区分大小写
-                return normalized_content in [keyword.strip() for keyword in rule.keywords]
-            else:
-                # 不区分大小写
-                content_lower = normalized_content.lower()
-                return content_lower in [k.strip().lower() for k in rule.keywords]
-        elif rule.match_type == MatchType.REGEX:
-            flags = 0 if case_sensitive else re.IGNORECASE
-            return any(re.search(keyword, normalized_content, flags) for keyword in rule.keywords)
-
-        return False
+    def _check_match(self, content: str, rule: Rule) -> bool:
+        return self._find_matched_keyword(content, rule) is not None
 
     def _get_block_settings(self) -> Optional[BlockSettings]:
         return getattr(self.discord_manager, "block_settings", None)
@@ -389,10 +627,7 @@ class AutoReplyClient(discord.Client):
         return getattr(rule, "ignore_mentions", False) and bool(getattr(message, "mentions", []))
 
     def _is_rule_match_case_sensitive(self, rule: Rule) -> bool:
-        block_settings = self._get_block_settings()
-        if block_settings is not None:
-            return block_settings.case_sensitive
-        return getattr(rule, "case_sensitive", False)
+        return False
 
     def _is_blocked_message(self, message) -> bool:
         block_settings = getattr(self.discord_manager, "block_settings", None)
@@ -639,6 +874,48 @@ class DiscordManager:
         self.max_rule_reply_records: int = 2000
         self.recent_replies: List[Dict] = []
         self.max_recent_replies: int = 1000
+        self.rule_matcher: Optional[RuleSetMatcher] = None
+        self.message_rule_matches: Dict[Tuple[int, str], Dict[str, str]] = {}
+        self.message_rule_match_order: List[Tuple[int, str]] = []
+        self.max_message_rule_matches: int = 2000
+
+    def invalidate_rule_matcher(self):
+        self.rule_matcher = None
+        self.message_rule_matches.clear()
+        self.message_rule_match_order.clear()
+
+    def _ensure_rule_matcher(self) -> RuleSetMatcher:
+        if self.rule_matcher is None:
+            self.rule_matcher = RuleSetMatcher(self.rules)
+        return self.rule_matcher
+
+    def _trim_message_rule_matches(self):
+        if len(self.message_rule_match_order) <= self.max_message_rule_matches:
+            return
+
+        remove_count = len(self.message_rule_match_order) // 2
+        expired_keys = self.message_rule_match_order[:remove_count]
+        self.message_rule_match_order = self.message_rule_match_order[remove_count:]
+        for cache_key in expired_keys:
+            self.message_rule_matches.pop(cache_key, None)
+
+    def get_message_rule_matches(self, message, content: str) -> Dict[str, str]:
+        if not content or not self.rules:
+            return {}
+
+        message_id = getattr(message, "id", 0) or 0
+        normalized_content = _normalize_match_text(content).lower()
+        cache_key = (message_id, hashlib.sha1(normalized_content.encode("utf-8")).hexdigest())
+
+        cached_matches = self.message_rule_matches.get(cache_key)
+        if cached_matches is not None:
+            return cached_matches
+
+        matched_keywords = self._ensure_rule_matcher().match_content(content)
+        self.message_rule_matches[cache_key] = matched_keywords
+        self.message_rule_match_order.append(cache_key)
+        self._trim_message_rule_matches()
+        return matched_keywords
 
     def _rule_matches_account(self, account: Account, rule: Rule) -> bool:
         return not account.rule_ids or rule.id in account.rule_ids
@@ -723,7 +1000,7 @@ class DiscordManager:
 
         self.rule_reply_accounts[reply_key].add(account_token)
 
-    def _record_reply(self, account: Account, message, keyword: str):
+    def _record_reply(self, account: Account, message, keyword: str, reply_text: str):
         account.reply_count = max(0, int(getattr(account, "reply_count", 0))) + 1
         account.last_sent_time = time.time()
 
@@ -733,7 +1010,8 @@ class DiscordManager:
             "account_alias": account.alias,
             "keyword": keyword,
             "target": _get_message_author_label(message),
-            "link": self._build_message_link(message),
+            "customer_message": getattr(message, "content", "") or "",
+            "reply_content": reply_text,
         })
         if len(self.recent_replies) > self.max_recent_replies:
             self.recent_replies = self.recent_replies[-self.max_recent_replies:]
@@ -795,6 +1073,7 @@ class DiscordManager:
         message,
         rule: Rule,
         *,
+        matched_keyword: str,
         preferred_account: Optional[Account] = None,
         preferred_client=None,
     ) -> int:
@@ -852,7 +1131,7 @@ class DiscordManager:
 
                 self._remember_rule_reply(reply_key, account.token)
                 already_replied_tokens.add(account.token)
-                self._record_reply(account, message, rule.keywords[0] if rule.keywords else "")
+                self._record_reply(account, message, matched_keyword, rule.reply)
                 success_count += 1
 
                 if len(already_replied_tokens) >= target_reply_count:
@@ -910,11 +1189,13 @@ class DiscordManager:
             reply_account_count=reply_account_count,
         )
         self.rules.append(rule)
+        self.invalidate_rule_matcher()
 
     def remove_rule(self, index: int):
         """移除规则"""
         if 0 <= index < len(self.rules):
             self.rules.pop(index)
+            self.invalidate_rule_matcher()
 
     def update_rule(self, index: int, **kwargs):
         """更新规则"""
@@ -923,6 +1204,7 @@ class DiscordManager:
             for key, value in kwargs.items():
                 if hasattr(rule, key):
                     setattr(rule, key, value)
+            self.invalidate_rule_matcher()
 
     async def start_all_clients(self):
         if self.is_running:
@@ -1106,7 +1388,7 @@ class DiscordManager:
                     account.cooldown_until = current_time + self.rotation_interval
                 self.current_rotation_index = (account_index + 1) % len(available_accounts)
 
-                self._record_reply(account, message, rule_name)
+                self._record_reply(account, message, rule_name, reply_text)
 
                 return True
 

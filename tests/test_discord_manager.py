@@ -162,6 +162,31 @@ class DiscordManagerStartupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.manager.clients), 1)
         self.assertEqual([rule.id for rule in self.manager.clients[0].rules], ["rule-1", "rule-2"])
 
+    async def test_get_message_rule_matches_reuses_cached_result_for_same_message(self):
+        self.manager.rules = [
+            Rule(
+                id="rule-1",
+                keywords=["hello"],
+                reply="world",
+                match_type=MatchType.PARTIAL,
+                target_channels=[],
+            )
+        ]
+        message = FakeMessage(message_id=9001)
+        message.content = "hello there"
+
+        first_result = self.manager.get_message_rule_matches(message, message.content)
+
+        with patch.object(
+            self.manager.rule_matcher,
+            "match_content",
+            side_effect=AssertionError("should reuse cached result"),
+        ):
+            second_result = self.manager.get_message_rule_matches(message, message.content)
+
+        self.assertEqual(first_result, {"rule-1": "hello"})
+        self.assertEqual(second_result, {"rule-1": "hello"})
+
     async def test_stop_all_clients_clears_tracked_tasks(self):
         with patch("src.discord_client.AutoReplyClient", FakeClient):
             await self.manager.start_all_clients()

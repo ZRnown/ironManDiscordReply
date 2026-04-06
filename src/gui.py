@@ -1,6 +1,7 @@
 import sys
 import asyncio
 import csv
+import hashlib
 import html
 import os
 import time
@@ -697,11 +698,6 @@ class BlockSettingsDialog(QDialog):
         self.ignore_mentions_checkbox.setToolTip("启用后，消息里带 @ 时，这类消息不会触发自动回复。")
         self.ignore_mentions_checkbox.setChecked(self.block_settings.ignore_mentions)
         match_options_layout.addWidget(self.ignore_mentions_checkbox)
-
-        self.case_sensitive_checkbox = QCheckBox("关键词区分大小写")
-        self.case_sensitive_checkbox.setToolTip("启用后，规则关键词和屏蔽关键词都会按大小写精确匹配。")
-        self.case_sensitive_checkbox.setChecked(self.block_settings.case_sensitive)
-        match_options_layout.addWidget(self.case_sensitive_checkbox)
         match_options_layout.addStretch()
         match_layout.addLayout(match_options_layout)
 
@@ -906,7 +902,7 @@ class BlockSettingsDialog(QDialog):
             account_tokens=self.get_selected_account_tokens(),
             ignore_replies=self.ignore_replies_checkbox.isChecked(),
             ignore_mentions=self.ignore_mentions_checkbox.isChecked(),
-            case_sensitive=self.case_sensitive_checkbox.isChecked(),
+            case_sensitive=False,
         )
 
     def accept(self):
@@ -1390,8 +1386,12 @@ class MainWindow(QMainWindow):
         self.reply_history_page_size = 20
         self.reply_history_page = 0
         self.reply_history_items = []
+        self.external_rule_sync_settings = self.default_external_rule_sync_settings()
+        self.external_rule_sync_timer = QTimer(self)
+        self.external_rule_sync_timer.timeout.connect(self.sync_rules_from_follow_file)
 
         self.init_ui()
+        self.apply_external_rule_sync_settings_to_ui()
         self.load_config()
 
         # 连接日志信号
@@ -1569,6 +1569,48 @@ class MainWindow(QMainWindow):
         rules_widget = QWidget()
         layout = QVBoxLayout(rules_widget)
 
+        follow_group = QGroupBox("关键词文件跟随")
+        follow_layout = QVBoxLayout(follow_group)
+
+        follow_top_row = QHBoxLayout()
+        self.external_rule_sync_enabled_checkbox = QCheckBox("启用文件跟随")
+        self.external_rule_sync_enabled_checkbox.stateChanged.connect(self.on_external_rule_sync_settings_changed)
+        follow_top_row.addWidget(self.external_rule_sync_enabled_checkbox)
+        follow_top_row.addStretch()
+        follow_layout.addLayout(follow_top_row)
+
+        follow_path_row = QHBoxLayout()
+        follow_path_row.addWidget(QLabel("文件路径"))
+        self.external_rule_sync_path_input = QLineEdit()
+        self.external_rule_sync_path_input.setPlaceholderText("选择要跟随的 xlsx/csv 文件")
+        self.external_rule_sync_path_input.editingFinished.connect(self.on_external_rule_sync_settings_changed)
+        follow_path_row.addWidget(self.external_rule_sync_path_input)
+
+        self.external_rule_sync_browse_btn = QPushButton("选择文件")
+        self.external_rule_sync_browse_btn.clicked.connect(self.browse_external_rule_sync_file)
+        follow_path_row.addWidget(self.external_rule_sync_browse_btn)
+        follow_layout.addLayout(follow_path_row)
+
+        follow_interval_row = QHBoxLayout()
+        follow_interval_row.addWidget(QLabel("检查间隔"))
+        self.external_rule_sync_interval_spin = QSpinBox()
+        self.external_rule_sync_interval_spin.setRange(5, 86400)
+        self.external_rule_sync_interval_spin.setSuffix("秒")
+        self.external_rule_sync_interval_spin.valueChanged.connect(self.on_external_rule_sync_settings_changed)
+        follow_interval_row.addWidget(self.external_rule_sync_interval_spin)
+
+        self.external_rule_sync_now_btn = QPushButton("立即同步")
+        self.external_rule_sync_now_btn.clicked.connect(lambda: self.sync_rules_from_follow_file(force=True))
+        follow_interval_row.addWidget(self.external_rule_sync_now_btn)
+        follow_interval_row.addStretch()
+        follow_layout.addLayout(follow_interval_row)
+
+        self.external_rule_sync_status_label = QLabel("未启用文件跟随")
+        self.external_rule_sync_status_label.setWordWrap(True)
+        self.external_rule_sync_status_label.setStyleSheet("color: gray;")
+        follow_layout.addWidget(self.external_rule_sync_status_label)
+        layout.addWidget(follow_group)
+
         block_group = QGroupBox("整体匹配和屏蔽设置")
         block_layout = QVBoxLayout(block_group)
         self.block_settings_summary_label = QLabel()
@@ -1691,22 +1733,22 @@ class MainWindow(QMainWindow):
         history_layout = QVBoxLayout(history_group)
         self.reply_history_table = QTableWidget()
         self.reply_history_table.setColumnCount(5)
-        self.reply_history_table.setHorizontalHeaderLabels(["时间", "账号", "关键词", "回复对象", "链接"])
+        self.reply_history_table.setHorizontalHeaderLabels(["时间", "账号", "触发关键词", "客户消息", "机器人回复"])
         history_header = self.reply_history_table.horizontalHeader()
         history_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         history_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        history_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        history_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        history_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        history_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         history_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         self.reply_history_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.reply_history_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.reply_history_table.itemDoubleClicked.connect(self.handle_reply_history_item_double_clicked)
+        self.reply_history_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
+        self.reply_history_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         history_layout.addWidget(self.reply_history_table)
 
         history_controls = QHBoxLayout()
-        self.open_reply_link_btn = QPushButton("打开选中链接")
-        self.open_reply_link_btn.clicked.connect(self.open_selected_reply_link)
-        history_controls.addWidget(self.open_reply_link_btn)
+        self.copy_reply_history_btn = QPushButton("复制选中内容")
+        self.copy_reply_history_btn.clicked.connect(self.copy_selected_reply_history_text)
+        history_controls.addWidget(self.copy_reply_history_btn)
 
         history_controls.addStretch()
 
@@ -1830,6 +1872,10 @@ class MainWindow(QMainWindow):
         self.discord_manager.accounts = accounts
         self.discord_manager.rules = rules
         self.discord_manager.block_settings = block_settings
+        self.external_rule_sync_settings = self.normalize_external_rule_sync_settings(
+            self.config_manager.external_rule_sync_settings
+        )
+        self.apply_external_rule_sync_settings_to_ui()
 
         # 加载轮换设置（暂时使用默认值，后续可以扩展配置文件）
         # TODO: 从配置文件加载轮换设置
@@ -1839,6 +1885,9 @@ class MainWindow(QMainWindow):
         self.update_rules_list()
         self.update_status()
 
+        if self.external_rule_sync_settings.get("enabled") and self.external_rule_sync_settings.get("file_path"):
+            self.sync_rules_from_follow_file(force=False)
+
     def save_config(self):
         """保存配置"""
         self.prune_block_settings_account_tokens()
@@ -1846,7 +1895,233 @@ class MainWindow(QMainWindow):
             self.discord_manager.accounts,
             self.discord_manager.rules,
             self.discord_manager.block_settings,
+            external_rule_sync_settings=self.external_rule_sync_settings,
         )
+
+    def default_external_rule_sync_settings(self):
+        return self.config_manager._default_external_rule_sync_settings()
+
+    def normalize_external_rule_sync_settings(self, settings=None):
+        return self.config_manager._normalize_external_rule_sync_settings(settings)
+
+    def set_external_rule_sync_status(self, text: str, color: str = "gray"):
+        if not hasattr(self, "external_rule_sync_status_label"):
+            return
+        self.external_rule_sync_status_label.setText(text)
+        self.external_rule_sync_status_label.setStyleSheet(f"color: {color};")
+
+    def refresh_external_rule_sync_timer(self):
+        settings = self.normalize_external_rule_sync_settings(self.external_rule_sync_settings)
+        self.external_rule_sync_settings = settings
+
+        should_run = bool(settings.get("enabled") and settings.get("file_path"))
+        interval_ms = max(5000, int(settings.get("interval_seconds", 60)) * 1000)
+
+        if should_run:
+            self.external_rule_sync_timer.start(interval_ms)
+        else:
+            self.external_rule_sync_timer.stop()
+
+        if hasattr(self, "external_rule_sync_now_btn"):
+            self.external_rule_sync_now_btn.setEnabled(should_run)
+
+    def apply_external_rule_sync_settings_to_ui(self):
+        settings = self.normalize_external_rule_sync_settings(self.external_rule_sync_settings)
+        self.external_rule_sync_settings = settings
+
+        widget_updates = [
+            (getattr(self, "external_rule_sync_enabled_checkbox", None), lambda widget: widget.setChecked(settings["enabled"])),
+            (getattr(self, "external_rule_sync_path_input", None), lambda widget: widget.setText(settings["file_path"])),
+            (getattr(self, "external_rule_sync_interval_spin", None), lambda widget: widget.setValue(settings["interval_seconds"])),
+        ]
+
+        for widget, update in widget_updates:
+            if widget is None:
+                continue
+            widget.blockSignals(True)
+            try:
+                update(widget)
+            finally:
+                widget.blockSignals(False)
+
+        if hasattr(self, "external_rule_sync_interval_spin"):
+            self.external_rule_sync_interval_spin.setEnabled(settings["enabled"])
+
+        self.refresh_external_rule_sync_timer()
+
+        if not settings["enabled"]:
+            self.set_external_rule_sync_status("未启用文件跟随", "gray")
+        elif not settings["file_path"]:
+            self.set_external_rule_sync_status("已启用文件跟随，但还没有选择文件", "gray")
+        else:
+            self.set_external_rule_sync_status(
+                f"已启用文件跟随，等待检查：{os.path.basename(settings['file_path'])}",
+                "gray",
+            )
+
+    def on_external_rule_sync_settings_changed(self):
+        previous_settings = dict(self.external_rule_sync_settings)
+        updated_settings = self.normalize_external_rule_sync_settings({
+            "enabled": self.external_rule_sync_enabled_checkbox.isChecked(),
+            "file_path": self.external_rule_sync_path_input.text().strip(),
+            "interval_seconds": self.external_rule_sync_interval_spin.value(),
+            "last_signature": previous_settings.get("last_signature", ""),
+        })
+        self.external_rule_sync_settings = updated_settings
+        self.apply_external_rule_sync_settings_to_ui()
+        self.save_config()
+
+        file_changed = previous_settings.get("file_path", "") != updated_settings.get("file_path", "")
+        enabled_now = updated_settings.get("enabled") and updated_settings.get("file_path")
+        enabled_before = previous_settings.get("enabled") and previous_settings.get("file_path")
+        if enabled_now and (file_changed or not enabled_before):
+            self.sync_rules_from_follow_file(force=True)
+
+    def browse_external_rule_sync_file(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择要跟随的关键词文件",
+            "",
+            "Excel / CSV 文件 (*.xlsx *.csv)",
+        )
+        if not filename:
+            return
+
+        self.external_rule_sync_path_input.setText(filename)
+        self.on_external_rule_sync_settings_changed()
+
+    @staticmethod
+    def _normalize_follow_rule_keywords(keywords: List[str]) -> tuple[str, ...]:
+        return tuple(
+            keyword.strip().lower()
+            for keyword in keywords or []
+            if str(keyword).strip()
+        )
+
+    def _build_external_rule_sync_signature(self, imported_rules: List[dict]) -> str:
+        payload = "\n".join(
+            f"{chr(31).join(item.get('keywords', []))}{chr(30)}{item.get('reply', '')}"
+            for item in imported_rules
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def sync_rules_from_follow_file(self, force: bool = False):
+        settings = self.normalize_external_rule_sync_settings(self.external_rule_sync_settings)
+        self.external_rule_sync_settings = settings
+
+        if not settings.get("enabled"):
+            self.refresh_external_rule_sync_timer()
+            self.set_external_rule_sync_status("未启用文件跟随", "gray")
+            return False
+
+        file_path = settings.get("file_path", "").strip()
+        if not file_path:
+            self.refresh_external_rule_sync_timer()
+            self.set_external_rule_sync_status("已启用文件跟随，但还没有选择文件", "gray")
+            return False
+
+        if not os.path.exists(file_path):
+            self.refresh_external_rule_sync_timer()
+            self.set_external_rule_sync_status(f"跟随文件不存在：{file_path}", "red")
+            return False
+
+        try:
+            imported_rules, skipped_rows = parse_rule_import_file(file_path)
+        except Exception as exc:
+            self.refresh_external_rule_sync_timer()
+            self.set_external_rule_sync_status(f"读取跟随文件失败：{exc}", "red")
+            self.add_log(f"关键词文件跟随读取失败: {exc}", "error")
+            return False
+
+        signature = self._build_external_rule_sync_signature(imported_rules)
+        if not force and signature == settings.get("last_signature", ""):
+            self.refresh_external_rule_sync_timer()
+            self.set_external_rule_sync_status(
+                f"文件无变化：{os.path.basename(file_path)}",
+                "gray",
+            )
+            return False
+
+        manual_rules = [
+            rule for rule in self.discord_manager.rules
+            if getattr(rule, "sync_source", "") != "follow_file"
+        ]
+        existing_follow_rules = [
+            rule for rule in self.discord_manager.rules
+            if getattr(rule, "sync_source", "") == "follow_file"
+        ]
+
+        existing_follow_rule_map = {}
+        existing_occurrence_map = {}
+        for rule in existing_follow_rules:
+            keyword_key = self._normalize_follow_rule_keywords(rule.keywords)
+            occurrence_index = existing_occurrence_map.get(keyword_key, 0)
+            existing_follow_rule_map[(keyword_key, occurrence_index)] = rule
+            existing_occurrence_map[keyword_key] = occurrence_index + 1
+
+        synced_rules = []
+        imported_occurrence_map = {}
+        for item in imported_rules:
+            keywords = [keyword.strip() for keyword in item.get("keywords", []) if keyword.strip()]
+            reply_text = str(item.get("reply", "") or "").strip()
+            if not keywords or not reply_text:
+                continue
+
+            keyword_key = self._normalize_follow_rule_keywords(keywords)
+            occurrence_index = imported_occurrence_map.get(keyword_key, 0)
+            imported_occurrence_map[keyword_key] = occurrence_index + 1
+
+            existing_rule = existing_follow_rule_map.get((keyword_key, occurrence_index))
+            if existing_rule is not None:
+                existing_rule.keywords = keywords
+                existing_rule.reply = reply_text
+                existing_rule.match_type = MatchType.PARTIAL
+                existing_rule.target_channels = []
+                existing_rule.delay_min = 0.0
+                existing_rule.delay_max = 0.0
+                existing_rule.case_sensitive = False
+                existing_rule.sync_source = "follow_file"
+                synced_rules.append(existing_rule)
+                continue
+
+            synced_rules.append(Rule(
+                id=f"follow_{int(time.time() * 1000)}_{len(synced_rules)}",
+                keywords=keywords,
+                reply=reply_text,
+                match_type=MatchType.PARTIAL,
+                target_channels=[],
+                delay_min=0.0,
+                delay_max=0.0,
+                is_active=True,
+                ignore_replies=True,
+                ignore_mentions=True,
+                case_sensitive=False,
+                exclude_keywords=[],
+                reply_account_count=1,
+                sync_source="follow_file",
+            ))
+
+        self.discord_manager.rules = manual_rules + synced_rules
+
+        valid_rule_ids = {rule.id for rule in self.discord_manager.rules}
+        for account in self.discord_manager.accounts:
+            if account.rule_ids:
+                account.rule_ids = [rule_id for rule_id in account.rule_ids if rule_id in valid_rule_ids]
+
+        settings["last_signature"] = signature
+        self.external_rule_sync_settings = self.normalize_external_rule_sync_settings(settings)
+
+        self.update_rules_list()
+        self.update_accounts_list()
+        self.save_config()
+        self.refresh_external_rule_sync_timer()
+
+        status_text = f"已同步 {len(synced_rules)} 条关键词，来源：{os.path.basename(file_path)}"
+        if skipped_rows:
+            status_text += f"，跳过 {skipped_rows} 行"
+        self.set_external_rule_sync_status(status_text, "green")
+        self.add_log(status_text, "success")
+        return True
 
     def update_accounts_list(self):
         """更新账号表格显示"""
@@ -2025,6 +2300,7 @@ class MainWindow(QMainWindow):
 
     def update_rules_list(self):
         """更新规则表格显示"""
+        self.discord_manager.invalidate_rule_matcher()
         self.rules_table.setRowCount(len(self.discord_manager.rules))
 
         for row, rule in enumerate(self.discord_manager.rules):
@@ -2154,9 +2430,6 @@ class MainWindow(QMainWindow):
             "忽略@消息 开启" if block_settings.ignore_mentions else "忽略@消息 关闭",
             f"生效范围 {scope_text}",
         ]
-
-        if block_settings.case_sensitive:
-            summary_parts.append("关键词大小写敏感已开启")
 
         if keyword_count == 0 and user_count == 0:
             summary_parts.insert(0, "当前还没有设置屏蔽关键词或屏蔽用户")
@@ -2307,19 +2580,12 @@ class MainWindow(QMainWindow):
             self.reply_history_table.setItem(row, 0, QTableWidgetItem(item_data.get("time_text", "")))
             self.reply_history_table.setItem(row, 1, QTableWidgetItem(item_data.get("account_alias", "")))
             self.reply_history_table.setItem(row, 2, QTableWidgetItem(item_data.get("keyword", "")))
-            self.reply_history_table.setItem(row, 3, QTableWidgetItem(item_data.get("target", "")))
-
-            link_text = item_data.get("link", "")
-            link_item = QTableWidgetItem(link_text)
-            link_item.setToolTip("双击或选中后点击“打开选中链接”")
-            link_item.setForeground(QColor(0, 102, 204))
-            link_item.setData(Qt.ItemDataRole.UserRole, link_text)
-            self.reply_history_table.setItem(row, 4, link_item)
+            self.reply_history_table.setItem(row, 3, QTableWidgetItem(item_data.get("customer_message", "")))
+            self.reply_history_table.setItem(row, 4, QTableWidgetItem(item_data.get("reply_content", "")))
 
         self.reply_history_page_label.setText(f"第 {self.reply_history_page + 1}/{total_pages} 页")
         self.reply_history_prev_btn.setEnabled(self.reply_history_page > 0)
         self.reply_history_next_btn.setEnabled(self.reply_history_page + 1 < total_pages)
-        self.open_reply_link_btn.setEnabled(bool(visible_items))
 
     def show_previous_reply_history_page(self):
         if self.reply_history_page <= 0:
@@ -2335,30 +2601,22 @@ class MainWindow(QMainWindow):
         self.reply_history_page += 1
         self.update_reply_history_table(self.reply_history_items)
 
-    def handle_reply_history_item_double_clicked(self, item):
-        if item is None or item.column() != 4:
-            return
-        self.open_reply_history_link_for_row(item.row())
-
-    def open_selected_reply_link(self):
-        current_row = self.reply_history_table.currentRow()
-        if current_row < 0:
-            QMessageBox.information(self, "提示", "请先选中一条回复记录")
-            return
-        self.open_reply_history_link_for_row(current_row)
-
-    def open_reply_history_link_for_row(self, row: int):
-        link_item = self.reply_history_table.item(row, 4)
-        if link_item is None:
+    def copy_selected_reply_history_text(self):
+        selected_indexes = sorted(
+            self.reply_history_table.selectedIndexes(),
+            key=lambda index: (index.row(), index.column()),
+        )
+        if not selected_indexes:
+            QMessageBox.information(self, "提示", "请先选中要复制的内容")
             return
 
-        link_text = (link_item.data(Qt.ItemDataRole.UserRole) or link_item.text() or "").strip()
-        if not link_text:
-            QMessageBox.information(self, "提示", "这条记录没有可打开的链接")
-            return
+        row_text_map = {}
+        for index in selected_indexes:
+            row_text_map.setdefault(index.row(), []).append(str(index.data() or ""))
 
-        if not QDesktopServices.openUrl(QUrl(link_text)):
-            QMessageBox.warning(self, "打开失败", "系统没有成功打开这个链接")
+        copied_text = "\n".join("\t".join(cells) for _, cells in sorted(row_text_map.items()))
+        QApplication.clipboard().setText(copied_text)
+        self.add_log("已复制选中的回复记录内容", "info")
 
     def show_accounts_context_menu(self, position):
         """显示账号右键菜单"""
@@ -3162,6 +3420,9 @@ class MainWindow(QMainWindow):
             self, "导出配置", "", "JSON 文件 (*.json)"
         )
         if filename:
+            self.config_manager.external_rule_sync_settings = self.normalize_external_rule_sync_settings(
+                self.external_rule_sync_settings
+            )
             if self.config_manager.export_config(
                 filename,
                 self.discord_manager.accounts,
@@ -3187,11 +3448,16 @@ class MainWindow(QMainWindow):
                 block_settings.blocked_channel_ids or
                 not block_settings.ignore_replies or
                 not block_settings.ignore_mentions or
-                block_settings.case_sensitive
+                self.config_manager.external_rule_sync_settings.get("enabled") or
+                bool(self.config_manager.external_rule_sync_settings.get("file_path"))
             ):
                 self.discord_manager.accounts = accounts
                 self.discord_manager.rules = rules
                 self.discord_manager.block_settings = block_settings
+                self.external_rule_sync_settings = self.normalize_external_rule_sync_settings(
+                    self.config_manager.external_rule_sync_settings
+                )
+                self.apply_external_rule_sync_settings_to_ui()
                 self.prune_block_settings_account_tokens()
                 self.update_accounts_list()
                 self.update_rules_list()

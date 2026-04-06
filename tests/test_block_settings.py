@@ -86,7 +86,30 @@ class ConfigManagerBlockSettingsTests(unittest.TestCase):
             self.assertEqual(loaded_block_settings.account_tokens, ["token-1"])
             self.assertFalse(loaded_block_settings.ignore_replies)
             self.assertFalse(loaded_block_settings.ignore_mentions)
-            self.assertTrue(loaded_block_settings.case_sensitive)
+            self.assertFalse(loaded_block_settings.case_sensitive)
+
+    def test_saves_and_loads_external_rule_sync_settings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ConfigManager(config_dir=temp_dir)
+
+            self.assertTrue(
+                manager.save_config(
+                    [],
+                    [],
+                    BlockSettings(),
+                    external_rule_sync_settings={
+                        "enabled": True,
+                        "file_path": "/tmp/follow.xlsx",
+                        "interval_seconds": 120,
+                    },
+                )
+            )
+
+            manager.load_config()
+
+            self.assertTrue(manager.external_rule_sync_settings["enabled"])
+            self.assertEqual(manager.external_rule_sync_settings["file_path"], "/tmp/follow.xlsx")
+            self.assertEqual(manager.external_rule_sync_settings["interval_seconds"], 120)
 
     def test_channel_scoped_block_only_applies_to_selected_channels(self):
         settings = BlockSettings(
@@ -150,7 +173,7 @@ class ConfigManagerBlockSettingsTests(unittest.TestCase):
 
             self.assertFalse(loaded_block_settings.ignore_replies)
             self.assertFalse(loaded_block_settings.ignore_mentions)
-            self.assertTrue(loaded_block_settings.case_sensitive)
+            self.assertFalse(loaded_block_settings.case_sensitive)
 
 
 class AccountChannelScopeTests(unittest.TestCase):

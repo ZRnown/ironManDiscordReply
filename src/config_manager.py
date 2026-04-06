@@ -13,6 +13,7 @@ class ConfigManager:
     def __init__(self, config_dir: str = "config"):
         self.config_dir = config_dir
         self.config_file = os.path.join(config_dir, "config.json")
+        self.external_rule_sync_settings = self._default_external_rule_sync_settings()
         self.ensure_config_dir()
 
     def ensure_config_dir(self):
@@ -83,6 +84,31 @@ class ConfigManager:
             count = 1
         return max(1, min(3, count))
 
+    @staticmethod
+    def _default_external_rule_sync_settings() -> Dict[str, Any]:
+        return {
+            "enabled": False,
+            "file_path": "",
+            "interval_seconds": 60,
+            "last_signature": "",
+        }
+
+    @classmethod
+    def _normalize_external_rule_sync_settings(cls, settings: Dict[str, Any] | None) -> Dict[str, Any]:
+        normalized_settings = cls._default_external_rule_sync_settings()
+        settings = settings or {}
+
+        normalized_settings["enabled"] = bool(settings.get("enabled", False))
+        normalized_settings["file_path"] = str(settings.get("file_path", "") or "").strip()
+
+        try:
+            interval_seconds = int(settings.get("interval_seconds", 60))
+        except (TypeError, ValueError):
+            interval_seconds = 60
+        normalized_settings["interval_seconds"] = max(5, interval_seconds)
+        normalized_settings["last_signature"] = str(settings.get("last_signature", "") or "")
+        return normalized_settings
+
     @classmethod
     def _derive_account_delay_range(cls, account_data: Dict[str, Any], rule_data_list: List[Dict[str, Any]]) -> tuple[float, float]:
         if "delay_min" in account_data or "delay_max" in account_data:
@@ -116,8 +142,18 @@ class ConfigManager:
         ]
         return min(delay_range[0] for delay_range in normalized_ranges), max(delay_range[1] for delay_range in normalized_ranges)
 
-    def save_config(self, accounts: List[Account], rules: List[Rule], block_settings: BlockSettings):
+    def save_config(
+        self,
+        accounts: List[Account],
+        rules: List[Rule],
+        block_settings: BlockSettings,
+        external_rule_sync_settings: Dict[str, Any] | None = None,
+    ):
         """保存配置到文件"""
+        normalized_sync_settings = self._normalize_external_rule_sync_settings(
+            external_rule_sync_settings if external_rule_sync_settings is not None else self.external_rule_sync_settings
+        )
+        self.external_rule_sync_settings = normalized_sync_settings
         config_data = {
             "accounts": [
                 {
@@ -142,8 +178,9 @@ class ConfigManager:
                 "account_tokens": block_settings.account_tokens,
                 "ignore_replies": block_settings.ignore_replies,
                 "ignore_mentions": block_settings.ignore_mentions,
-                "case_sensitive": block_settings.case_sensitive,
+                "case_sensitive": False,
             },
+            "external_rule_sync_settings": normalized_sync_settings,
             "rules": [
                 {
                     "id": rule.id,
@@ -155,8 +192,9 @@ class ConfigManager:
                     "is_active": rule.is_active,
                     "ignore_replies": getattr(rule, 'ignore_replies', False),
                     "ignore_mentions": getattr(rule, 'ignore_mentions', False),
-                    "case_sensitive": getattr(rule, 'case_sensitive', False),
+                    "case_sensitive": False,
                     "reply_account_count": getattr(rule, "reply_account_count", 1),
+                    "sync_source": getattr(rule, "sync_source", ""),
                 }
                 for rule in rules
             ]
@@ -181,6 +219,9 @@ class ConfigManager:
 
             accounts_data = config_data.get("accounts", [])
             rules_data = config_data.get("rules", [])
+            self.external_rule_sync_settings = self._normalize_external_rule_sync_settings(
+                config_data.get("external_rule_sync_settings", {})
+            )
             rules = []
             legacy_blocked_keywords = []
             for rule_data in rules_data:
@@ -199,9 +240,10 @@ class ConfigManager:
                     is_active=rule_data.get("is_active", True),
                     ignore_replies=rule_data.get("ignore_replies", False),
                     ignore_mentions=rule_data.get("ignore_mentions", False),
-                    case_sensitive=rule_data.get("case_sensitive", False),
+                    case_sensitive=False,
                     exclude_keywords=[],
                     reply_account_count=self._normalize_reply_account_count(rule_data.get("reply_account_count", 1)),
+                    sync_source=rule_data.get("sync_source", ""),
                 )
                 rules.append(rule)
 
@@ -258,13 +300,14 @@ class ConfigManager:
                 account_tokens=account_tokens,
                 ignore_replies=block_settings_data.get("ignore_replies", legacy_ignore_replies),
                 ignore_mentions=block_settings_data.get("ignore_mentions", legacy_ignore_mentions),
-                case_sensitive=block_settings_data.get("case_sensitive", legacy_case_sensitive),
+                case_sensitive=False,
             )
 
             return accounts, rules, block_settings
 
         except Exception as e:
             print(f"加载配置失败: {e}")
+            self.external_rule_sync_settings = self._default_external_rule_sync_settings()
             return [], [], BlockSettings()
 
     def export_config(self, filepath: str, accounts: List[Account], rules: List[Rule], block_settings: BlockSettings) -> bool:
@@ -290,8 +333,9 @@ class ConfigManager:
                     "account_tokens": block_settings.account_tokens,
                     "ignore_replies": block_settings.ignore_replies,
                     "ignore_mentions": block_settings.ignore_mentions,
-                    "case_sensitive": block_settings.case_sensitive,
+                    "case_sensitive": False,
                 },
+                "external_rule_sync_settings": self.external_rule_sync_settings,
                 "rules": [
                     {
                         "keywords": rule.keywords,
@@ -302,8 +346,9 @@ class ConfigManager:
                         "is_active": rule.is_active,
                         "ignore_replies": getattr(rule, 'ignore_replies', False),
                         "ignore_mentions": getattr(rule, 'ignore_mentions', False),
-                        "case_sensitive": getattr(rule, 'case_sensitive', False),
+                        "case_sensitive": False,
                         "reply_account_count": getattr(rule, "reply_account_count", 1),
+                        "sync_source": getattr(rule, "sync_source", ""),
                     }
                     for rule in rules
                 ]
@@ -324,6 +369,9 @@ class ConfigManager:
 
             accounts_data = config_data.get("accounts", [])
             rules_data = config_data.get("rules", [])
+            self.external_rule_sync_settings = self._normalize_external_rule_sync_settings(
+                config_data.get("external_rule_sync_settings", {})
+            )
             rules = []
             legacy_blocked_keywords = []
             for rule_data in rules_data:
@@ -342,9 +390,10 @@ class ConfigManager:
                     is_active=rule_data.get("is_active", True),
                     ignore_replies=rule_data.get("ignore_replies", False),
                     ignore_mentions=rule_data.get("ignore_mentions", False),
-                    case_sensitive=rule_data.get("case_sensitive", False),
+                    case_sensitive=False,
                     exclude_keywords=[],
                     reply_account_count=self._normalize_reply_account_count(rule_data.get("reply_account_count", 1)),
+                    sync_source=rule_data.get("sync_source", ""),
                 )
                 rules.append(rule)
 
@@ -401,7 +450,7 @@ class ConfigManager:
                 account_tokens=account_tokens,
                 ignore_replies=block_settings_data.get("ignore_replies", legacy_ignore_replies),
                 ignore_mentions=block_settings_data.get("ignore_mentions", legacy_ignore_mentions),
-                case_sensitive=block_settings_data.get("case_sensitive", legacy_case_sensitive),
+                case_sensitive=False,
             )
 
             return accounts, rules, block_settings

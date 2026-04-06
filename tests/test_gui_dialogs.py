@@ -14,6 +14,7 @@ from pathlib import Path
 import tempfile
 
 from src.discord_client import Account, MatchType, Rule
+from tests.test_gui_helpers import build_test_xlsx
 if QApplication is not None:
     from src.gui import MainWindow, RuleDialog
 
@@ -175,8 +176,8 @@ class MainWindowReplyHistoryTests(GuiTestCase):
                 "time_text": f"10:{index:02d}",
                 "account_alias": "sender#0001",
                 "keyword": f"keyword-{index}",
-                "target": "Alice",
-                "link": f"https://discord.com/channels/1/2/{index}",
+                "customer_message": f"customer-{index}",
+                "reply_content": f"reply-{index}",
             }
             for index in range(25)
         ]
@@ -186,6 +187,8 @@ class MainWindowReplyHistoryTests(GuiTestCase):
         self.assertEqual(self.window.reply_history_table.rowCount(), 20)
         self.assertEqual(self.window.reply_history_page_label.text(), "第 1/2 页")
         self.assertEqual(self.window.reply_history_table.item(0, 2).text(), "keyword-24")
+        self.assertEqual(self.window.reply_history_table.item(0, 3).text(), "customer-24")
+        self.assertEqual(self.window.reply_history_table.item(0, 4).text(), "reply-24")
 
         self.window.show_next_reply_history_page()
 
@@ -193,24 +196,68 @@ class MainWindowReplyHistoryTests(GuiTestCase):
         self.assertEqual(self.window.reply_history_page_label.text(), "第 2/2 页")
         self.assertEqual(self.window.reply_history_table.item(0, 2).text(), "keyword-4")
 
-    def test_open_selected_reply_link_uses_desktop_services(self):
+    def test_copy_selected_reply_history_text_copies_selected_cells(self):
         self.window.discord_manager.recent_replies = [
             {
                 "time_text": "10:00",
                 "account_alias": "sender#0001",
                 "keyword": "keyword-1",
-                "target": "Alice",
-                "link": "https://discord.com/channels/1/2/3",
+                "customer_message": "customer-1",
+                "reply_content": "reply-1",
             }
         ]
+
         self.window.update_status()
-        self.window.reply_history_table.setCurrentCell(0, 4)
+        self.window.reply_history_table.item(0, 3).setSelected(True)
+        self.window.reply_history_table.item(0, 4).setSelected(True)
 
-        with patch("src.gui.QDesktopServices.openUrl", return_value=True) as open_mock:
-            self.window.open_selected_reply_link()
+        self.window.copy_selected_reply_history_text()
 
-        self.assertEqual(open_mock.call_count, 1)
-        self.assertEqual(open_mock.call_args[0][0].toString(), "https://discord.com/channels/1/2/3")
+        self.assertEqual(QApplication.clipboard().text(), "customer-1\treply-1")
+
+
+class MainWindowFollowFileSyncTests(GuiTestCase):
+    def setUp(self):
+        with patch.object(MainWindow, "load_config", autospec=True):
+            self.window = MainWindow()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+
+    def test_sync_rules_from_follow_xlsx_adds_and_removes_rules(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            xlsx_path = Path(temp_dir) / "follow.xlsx"
+            build_test_xlsx(
+                xlsx_path,
+                [
+                    ("alpha", "reply-a"),
+                    ("beta", "reply-b"),
+                ],
+            )
+
+            self.window.external_rule_sync_settings["enabled"] = True
+            self.window.external_rule_sync_settings["file_path"] = str(xlsx_path)
+            self.window.external_rule_sync_settings["interval_seconds"] = 30
+
+            self.window.sync_rules_from_follow_file(force=True)
+
+            self.assertEqual(len(self.window.discord_manager.rules), 2)
+            self.assertTrue(all(getattr(rule, "sync_source", "") == "follow_file" for rule in self.window.discord_manager.rules))
+            self.assertEqual([rule.reply for rule in self.window.discord_manager.rules], ["reply-a", "reply-b"])
+
+            build_test_xlsx(
+                xlsx_path,
+                [
+                    ("alpha", "reply-a-updated"),
+                ],
+            )
+
+            self.window.sync_rules_from_follow_file(force=True)
+
+            self.assertEqual(len(self.window.discord_manager.rules), 1)
+            self.assertEqual(self.window.discord_manager.rules[0].keywords, ["alpha"])
+            self.assertEqual(self.window.discord_manager.rules[0].reply, "reply-a-updated")
 
 
 class MainWindowRuleSelectionTests(GuiTestCase):
