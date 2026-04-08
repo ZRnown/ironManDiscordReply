@@ -1379,7 +1379,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, config_dir: Optional[str] = None, instance_name: Optional[str] = None):
         super().__init__()
-        self.instance_name = resolve_runtime_instance_name(instance_name)
+        self.instance_name = resolve_runtime_instance_name(instance_name, prefer_packaged_default=True)
         self.runtime_config_dir = resolve_runtime_config_dir(config_dir, instance_name)
         self.discord_manager = DiscordManager(log_callback=self.add_log_thread_safe)
         self.config_manager = ConfigManager(config_dir=self.runtime_config_dir)
@@ -2706,7 +2706,7 @@ class MainWindow(QMainWindow):
             f"当前实例: {instance_text}",
             f"当前数据目录: {self.data_dir}",
             f"配置文件: {self.config_file_path}",
-            "多开时可用 --instance 名称，或设置 DISCORD_REPLY_DATA_DIR 到独立目录。",
+            "打包版直接双击时，会按 exe 副本自动分开数据；也可继续用 --instance 或 DISCORD_REPLY_DATA_DIR 手动指定。",
         ]
         self.data_dir_label.setText("\n".join(summary_lines))
         self.data_dir_label.setToolTip(self.config_file_path)

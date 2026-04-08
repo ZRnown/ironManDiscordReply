@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -233,6 +234,17 @@ class RuntimeConfigPathTests(unittest.TestCase):
         self.assertTrue(
             config_dir.endswith(os.path.join("DiscordAutoReply", "instances", "Team_A"))
         )
+
+    def test_resolve_runtime_config_dir_uses_packaged_executable_copy_when_no_instance_given(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(sys, "frozen", True, create=True), patch.object(
+            sys,
+            "executable",
+            os.path.join("C:\\Apps", "DiscordAutoReply-A.exe"),
+        ):
+            config_dir = resolve_runtime_config_dir()
+
+        self.assertIn(os.path.join("DiscordAutoReply", "portable"), config_dir)
+        self.assertRegex(os.path.basename(config_dir), r"DiscordAutoReply-A_[0-9a-f]{8}")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -21,10 +22,34 @@ def normalize_instance_name(instance_name: str | None) -> str:
     return cleaned_name or DEFAULT_INSTANCE_NAME
 
 
-def resolve_runtime_instance_name(instance_name: str | None = None) -> str:
+def get_frozen_executable_path() -> str:
+    if not getattr(sys, "frozen", False):
+        return ""
+
+    executable_path = str(getattr(sys, "executable", "") or "").strip()
+    if not executable_path:
+        return ""
+    return os.path.abspath(os.path.expanduser(executable_path))
+
+
+def build_packaged_instance_name(executable_path: str) -> str:
+    return normalize_instance_name(Path(executable_path).stem)
+
+
+def build_packaged_storage_key(executable_path: str) -> str:
+    normalized_executable_path = os.path.normcase(os.path.abspath(executable_path))
+    path_digest = hashlib.sha1(normalized_executable_path.encode("utf-8")).hexdigest()[:8]
+    return f"{build_packaged_instance_name(executable_path)}_{path_digest}"
+
+
+def resolve_runtime_instance_name(instance_name: str | None = None, prefer_packaged_default: bool = False) -> str:
     requested_name = instance_name if instance_name is not None else os.environ.get("DISCORD_REPLY_INSTANCE", "")
     normalized_name = str(requested_name or "").strip()
     if not normalized_name:
+        if prefer_packaged_default:
+            executable_path = get_frozen_executable_path()
+            if executable_path:
+                return build_packaged_instance_name(executable_path)
         return ""
     return normalize_instance_name(normalized_name)
 
@@ -50,6 +75,10 @@ def resolve_runtime_config_dir(
     resolved_instance_name = resolve_runtime_instance_name(instance_name)
     if resolved_instance_name:
         return os.path.join(get_platform_data_root(), "instances", resolved_instance_name)
+
+    executable_path = get_frozen_executable_path()
+    if executable_path:
+        return os.path.join(get_platform_data_root(), "portable", build_packaged_storage_key(executable_path))
 
     base_dir = str(config_dir or "config").strip() or "config"
     return os.path.abspath(os.path.expanduser(base_dir))

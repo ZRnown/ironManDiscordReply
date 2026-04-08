@@ -1,4 +1,5 @@
 import os
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -243,6 +244,28 @@ class MainWindowReplyHistoryTests(GuiTestCase):
 
         self.assertEqual(open_mock.call_count, 1)
         self.assertEqual(open_mock.call_args[0][0].toString(), "https://discord.com/channels/456/123/1001")
+
+
+class MainWindowStorageStatusTests(GuiTestCase):
+    def tearDown(self):
+        if hasattr(self, "window"):
+            self.window.close()
+            self.window.deleteLater()
+
+    def test_packaged_copy_shows_current_executable_name_as_instance(self):
+        with patch.object(MainWindow, "load_config", autospec=True), patch.object(
+            sys,
+            "frozen",
+            True,
+            create=True,
+        ), patch.object(
+            sys,
+            "executable",
+            os.path.join("C:\\Apps", "DiscordAutoReply-A.exe"),
+        ):
+            self.window = MainWindow()
+
+        self.assertIn("当前实例: DiscordAutoReply-A", self.window.data_dir_label.text())
 
 
 class MainWindowFollowFileSyncTests(GuiTestCase):
