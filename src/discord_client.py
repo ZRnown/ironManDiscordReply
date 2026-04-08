@@ -329,8 +329,8 @@ class RuleSetMatcher:
     def __init__(self, rules: List[Rule]):
         self.rules = list(rules)
         self.partial_automaton = None
-        self.exact_keyword_map: Dict[str, List[Tuple[str, int, int, str]]] = {}
-        self.regex_keyword_entries: List[Tuple[str, int, int, str, Optional[re.Pattern]]] = []
+        self.exact_keyword_map: Dict[str, List[Tuple[str, int, int, str, int]]] = {}
+        self.regex_keyword_entries: List[Tuple[str, int, int, str, Optional[re.Pattern], int]] = []
         self._build()
 
     def _build(self):
@@ -361,7 +361,7 @@ class RuleSetMatcher:
                     partial_keyword_count += 1
                 elif rule.match_type == MatchType.EXACT:
                     self.exact_keyword_map.setdefault(normalized_keyword.lower(), []).append(
-                        (rule.id, rule_index, keyword_index, keyword)
+                        (rule.id, rule_index, keyword_index, keyword, len(normalized_keyword))
                     )
                 elif rule.match_type == MatchType.REGEX:
                     try:
@@ -369,7 +369,7 @@ class RuleSetMatcher:
                     except re.error:
                         compiled_pattern = None
                     self.regex_keyword_entries.append(
-                        (rule.id, rule_index, keyword_index, keyword, compiled_pattern)
+                        (rule.id, rule_index, keyword_index, keyword, compiled_pattern, len(normalized_keyword))
                     )
 
         if partial_keyword_count > 0:
@@ -381,11 +381,11 @@ class RuleSetMatcher:
         matched_keywords: Dict[str, str],
         matched_ranks: Dict[str, Tuple[int, int]],
         rule_id: str,
-        rule_index: int,
         keyword_index: int,
         keyword: str,
+        keyword_length: int,
     ):
-        new_rank = (rule_index, keyword_index)
+        new_rank = (-keyword_length, keyword_index)
         current_rank = matched_ranks.get(rule_id)
         if current_rank is None or new_rank < current_rank:
             matched_ranks[rule_id] = new_rank
@@ -414,22 +414,22 @@ class RuleSetMatcher:
                     matched_keywords,
                     matched_ranks,
                     rule_id,
-                    rule_index,
                     keyword_index,
                     keyword,
+                    keyword_length,
                 )
 
-        for rule_id, rule_index, keyword_index, keyword in self.exact_keyword_map.get(normalized_lower_content, []):
+        for rule_id, _rule_index, keyword_index, keyword, keyword_length in self.exact_keyword_map.get(normalized_lower_content, []):
             self._update_best_match(
                 matched_keywords,
                 matched_ranks,
                 rule_id,
-                rule_index,
                 keyword_index,
                 keyword,
+                keyword_length,
             )
 
-        for rule_id, rule_index, keyword_index, keyword, compiled_pattern in self.regex_keyword_entries:
+        for rule_id, _rule_index, keyword_index, keyword, compiled_pattern, keyword_length in self.regex_keyword_entries:
             if compiled_pattern is None or compiled_pattern.search(normalized_content) is None:
                 continue
 
@@ -437,9 +437,9 @@ class RuleSetMatcher:
                 matched_keywords,
                 matched_ranks,
                 rule_id,
-                rule_index,
                 keyword_index,
                 keyword,
+                keyword_length,
             )
 
         return matched_keywords

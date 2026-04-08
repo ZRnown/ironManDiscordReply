@@ -208,6 +208,17 @@ class AutoReplyClientMessageTests(unittest.IsolatedAsyncioTestCase):
         status = self.manager.get_status()
         self.assertEqual(status["recent_replies"][0]["keyword"], "Eric Emmanuel Shorts")
 
+    async def test_partial_match_prefers_longer_keyword_when_same_rule_has_multiple_matches(self):
+        self.rule.keywords = ["hoodie", "nike hoodie"]
+        self.rule.match_type = MatchType.PARTIAL
+        message = FakeInboundMessage(content="nike hoodie", author_name="Alice")
+
+        await self.client.on_message(message)
+
+        self.assertEqual(len(message.reply_calls), 1)
+        status = self.manager.get_status()
+        self.assertEqual(status["recent_replies"][0]["keyword"], "nike hoodie")
+
     async def test_exact_match_ignores_surrounding_whitespace(self):
         self.rule.keywords = ["exact value"]
         self.rule.match_type = MatchType.EXACT
