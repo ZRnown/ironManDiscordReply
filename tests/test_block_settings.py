@@ -1,8 +1,10 @@
 import json
+import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from src.config_manager import ConfigManager
+from src.config_manager import ConfigManager, resolve_runtime_config_dir
 from src.discord_client import Account, BlockSettings, MatchType, Rule
 
 
@@ -221,6 +223,16 @@ class ConfigManagerAccountChannelTests(unittest.TestCase):
             self.assertEqual(loaded_accounts[0].target_channels, [100, 200, 300])
             self.assertEqual(loaded_rules[0].target_channels, [])
             self.assertEqual(loaded_rules[1].target_channels, [])
+
+
+class RuntimeConfigPathTests(unittest.TestCase):
+    def test_resolve_runtime_config_dir_uses_instance_subdirectory(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config_dir = resolve_runtime_config_dir(instance_name="Team A")
+
+        self.assertTrue(
+            config_dir.endswith(os.path.join("DiscordAutoReply", "instances", "Team_A"))
+        )
 
 
 if __name__ == "__main__":

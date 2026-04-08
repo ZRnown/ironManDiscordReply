@@ -1,3 +1,4 @@
+import argparse
 import sys
 import asyncio
 import csv
@@ -21,7 +22,7 @@ from PySide6.QtGui import QFont, QIcon, QColor, QDesktopServices
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from discord_client import DiscordManager, Account, Rule, MatchType, BlockSettings
-from config_manager import ConfigManager
+from config_manager import ConfigManager, resolve_runtime_config_dir, resolve_runtime_instance_name
 from gui_helpers import (
     apply_checked_indices,
     build_row_selection_range,
@@ -1376,10 +1377,14 @@ class MainWindow(QMainWindow):
     # 定义信号
     log_signal = Signal(str, str)  # message, level
 
-    def __init__(self):
+    def __init__(self, config_dir: Optional[str] = None, instance_name: Optional[str] = None):
         super().__init__()
+        self.instance_name = resolve_runtime_instance_name(instance_name)
+        self.runtime_config_dir = resolve_runtime_config_dir(config_dir, instance_name)
         self.discord_manager = DiscordManager(log_callback=self.add_log_thread_safe)
-        self.config_manager = ConfigManager()
+        self.config_manager = ConfigManager(config_dir=self.runtime_config_dir)
+        self.data_dir = os.path.abspath(self.config_manager.config_dir)
+        self.config_file_path = os.path.abspath(self.config_manager.config_file)
 
         self.worker_thread = None
         self._updating_accounts_table = False
@@ -1397,9 +1402,15 @@ class MainWindow(QMainWindow):
         # 连接日志信号
         self.log_signal.connect(self.add_log)
 
+    def build_window_title(self) -> str:
+        title = "Discord 自动回复工具"
+        if self.instance_name:
+            return f"{title} - {self.instance_name}"
+        return title
+
     def init_ui(self):
         """初始化用户界面"""
-        self.setWindowTitle("Discord 自动回复工具")
+        self.setWindowTitle(self.build_window_title())
         self.setGeometry(100, 100, 1200, 800)
 
         # 创建中央部件
@@ -1676,6 +1687,16 @@ class MainWindow(QMainWindow):
         delete_selected_rules_btn.clicked.connect(self.remove_selected_rules)
         batch_layout.addWidget(delete_selected_rules_btn)
 
+        batch_layout.addSpacing(12)
+        batch_layout.addWidget(QLabel("全部规则回复账号数"))
+        self.bulk_reply_account_count_combo = QComboBox()
+        self.bulk_reply_account_count_combo.addItems(["1个账号", "2个账号", "3个账号"])
+        batch_layout.addWidget(self.bulk_reply_account_count_combo)
+
+        apply_bulk_reply_count_btn = QPushButton("应用到全部")
+        apply_bulk_reply_count_btn.clicked.connect(self.apply_reply_account_count_to_all_rules)
+        batch_layout.addWidget(apply_bulk_reply_count_btn)
+
         batch_layout.addStretch()
         batch_hint = QLabel("支持 Ctrl/Cmd/Shift 多选")
         batch_hint.setStyleSheet("color: gray;")
@@ -1732,17 +1753,19 @@ class MainWindow(QMainWindow):
         history_group = QGroupBox("最近回复记录")
         history_layout = QVBoxLayout(history_group)
         self.reply_history_table = QTableWidget()
-        self.reply_history_table.setColumnCount(5)
-        self.reply_history_table.setHorizontalHeaderLabels(["时间", "账号", "触发关键词", "客户消息", "机器人回复"])
+        self.reply_history_table.setColumnCount(6)
+        self.reply_history_table.setHorizontalHeaderLabels(["时间", "账号", "触发关键词", "客户消息", "消息链接", "机器人回复"])
         history_header = self.reply_history_table.horizontalHeader()
         history_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         history_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         history_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         history_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        history_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        history_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        history_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.reply_history_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.reply_history_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
         self.reply_history_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.reply_history_table.cellClicked.connect(self.open_reply_history_message_link)
         history_layout.addWidget(self.reply_history_table)
 
         history_controls = QHBoxLayout()
@@ -1773,6 +1796,26 @@ class MainWindow(QMainWindow):
         rules_layout.addWidget(self.status_rules_stats_label)
 
         layout.addWidget(rules_group)
+
+        storage_group = QGroupBox("数据存储")
+        storage_layout = QVBoxLayout(storage_group)
+
+        self.data_dir_label = QLabel()
+        self.data_dir_label.setWordWrap(True)
+        self.data_dir_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        storage_layout.addWidget(self.data_dir_label)
+
+        storage_controls = QHBoxLayout()
+        open_data_dir_btn = QPushButton("打开数据目录")
+        open_data_dir_btn.clicked.connect(self.open_data_directory)
+        storage_controls.addWidget(open_data_dir_btn)
+
+        copy_data_dir_btn = QPushButton("复制路径")
+        copy_data_dir_btn.clicked.connect(self.copy_data_directory_path)
+        storage_controls.addWidget(copy_data_dir_btn)
+        storage_controls.addStretch()
+        storage_layout.addLayout(storage_controls)
+        layout.addWidget(storage_group)
 
         # 轮换设置
         rotation_group = QGroupBox("账号轮换设置")
@@ -1833,6 +1876,7 @@ class MainWindow(QMainWindow):
         log_layout.addWidget(self.log_text)
 
         layout.addWidget(log_group)
+        self.refresh_data_directory_status()
 
         self.tab_widget.addTab(status_widget, "状态监控")
 
@@ -2581,7 +2625,8 @@ class MainWindow(QMainWindow):
             self.reply_history_table.setItem(row, 1, QTableWidgetItem(item_data.get("account_alias", "")))
             self.reply_history_table.setItem(row, 2, QTableWidgetItem(item_data.get("keyword", "")))
             self.reply_history_table.setItem(row, 3, QTableWidgetItem(item_data.get("customer_message", "")))
-            self.reply_history_table.setItem(row, 4, QTableWidgetItem(item_data.get("reply_content", "")))
+            self.reply_history_table.setItem(row, 4, self.create_reply_history_link_item(item_data.get("message_link", "")))
+            self.reply_history_table.setItem(row, 5, QTableWidgetItem(item_data.get("reply_content", "")))
 
         self.reply_history_page_label.setText(f"第 {self.reply_history_page + 1}/{total_pages} 页")
         self.reply_history_prev_btn.setEnabled(self.reply_history_page > 0)
@@ -2612,11 +2657,67 @@ class MainWindow(QMainWindow):
 
         row_text_map = {}
         for index in selected_indexes:
-            row_text_map.setdefault(index.row(), []).append(str(index.data() or ""))
+            table_item = self.reply_history_table.item(index.row(), index.column())
+            cell_text = str(index.data() or "")
+            if table_item is not None:
+                link_value = str(table_item.data(Qt.ItemDataRole.UserRole) or "").strip()
+                if link_value:
+                    cell_text = link_value
+            row_text_map.setdefault(index.row(), []).append(cell_text)
 
         copied_text = "\n".join("\t".join(cells) for _, cells in sorted(row_text_map.items()))
         QApplication.clipboard().setText(copied_text)
         self.add_log("已复制选中的回复记录内容", "info")
+
+    def create_reply_history_link_item(self, message_link: str) -> QTableWidgetItem:
+        link_value = str(message_link or "").strip()
+        display_text = "打开消息" if link_value else "-"
+        link_item = QTableWidgetItem(display_text)
+        link_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        link_item.setData(Qt.ItemDataRole.UserRole, link_value)
+        if link_value:
+            font = link_item.font()
+            font.setUnderline(True)
+            link_item.setFont(font)
+            link_item.setForeground(QColor("#0b63ce"))
+            link_item.setToolTip(link_value)
+        return link_item
+
+    def open_reply_history_message_link(self, row: int, column: int):
+        if column != 4:
+            return
+
+        link_item = self.reply_history_table.item(row, column)
+        if link_item is None:
+            return
+
+        message_link = str(link_item.data(Qt.ItemDataRole.UserRole) or "").strip()
+        if not message_link:
+            return
+
+        QDesktopServices.openUrl(QUrl(message_link))
+
+    def refresh_data_directory_status(self):
+        if not hasattr(self, "data_dir_label"):
+            return
+
+        instance_text = self.instance_name if self.instance_name else "默认共享目录"
+        summary_lines = [
+            f"当前实例: {instance_text}",
+            f"当前数据目录: {self.data_dir}",
+            f"配置文件: {self.config_file_path}",
+            "多开时可用 --instance 名称，或设置 DISCORD_REPLY_DATA_DIR 到独立目录。",
+        ]
+        self.data_dir_label.setText("\n".join(summary_lines))
+        self.data_dir_label.setToolTip(self.config_file_path)
+
+    def open_data_directory(self):
+        self.config_manager.ensure_config_dir()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self.data_dir))
+
+    def copy_data_directory_path(self):
+        QApplication.clipboard().setText(self.data_dir)
+        self.add_log("数据目录路径已复制", "info")
 
     def show_accounts_context_menu(self, position):
         """显示账号右键菜单"""
@@ -2788,6 +2889,20 @@ class MainWindow(QMainWindow):
             return
 
         self.remove_multiple_rules(selected_rows)
+
+    def apply_reply_account_count_to_all_rules(self):
+        if not self.discord_manager.rules:
+            QMessageBox.information(self, "提示", "当前没有规则可供修改")
+            return
+
+        reply_account_count = self.bulk_reply_account_count_combo.currentIndex() + 1
+        for rule in self.discord_manager.rules:
+            rule.reply_account_count = reply_account_count
+
+        self.update_rules_list()
+        self.save_config()
+        self.add_log(f"已将全部规则的回复账号数改为 {reply_account_count} 个账号", "success")
+        QMessageBox.information(self, "成功", f"已将全部规则改为 {reply_account_count} 个账号回复")
 
     def add_account(self):
         """添加新账号"""
@@ -3467,9 +3582,26 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "错误", "配置导入失败")
 
 
-def main():
+def parse_runtime_options(argv: Optional[List[str]] = None) -> tuple[List[str], str, str]:
+    raw_args = list(argv if argv is not None else sys.argv)
+    if not raw_args:
+        raw_args = ["discord-reply"]
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--data-dir", dest="data_dir")
+    parser.add_argument("--instance", dest="instance_name")
+    parsed_args, remaining_args = parser.parse_known_args(raw_args[1:])
+
+    qt_args = [raw_args[0], *remaining_args]
+    config_dir = resolve_runtime_config_dir(parsed_args.data_dir, parsed_args.instance_name)
+    instance_name = resolve_runtime_instance_name(parsed_args.instance_name)
+    return qt_args, config_dir, instance_name
+
+
+def main(argv: Optional[List[str]] = None):
     """主函数"""
-    app = QApplication(sys.argv)
+    qt_args, config_dir, instance_name = parse_runtime_options(argv)
+    app = QApplication(qt_args)
     app.setStyle('Fusion')  # 使用更现代的样式
 
     # 设置应用程序属性，确保在macOS上正确显示
@@ -3477,7 +3609,7 @@ def main():
     app.setApplicationVersion("1.0.0")
     app.setOrganizationName("DiscordAutoReply")
 
-    window = MainWindow()
+    window = MainWindow(config_dir=config_dir, instance_name=instance_name)
     window.show()
     window.raise_()  # 确保窗口在前台显示
     window.activateWindow()  # 激活窗口
@@ -3492,4 +3624,4 @@ def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

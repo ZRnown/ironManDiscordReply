@@ -1003,6 +1003,7 @@ class DiscordManager:
     def _record_reply(self, account: Account, message, keyword: str, reply_text: str):
         account.reply_count = max(0, int(getattr(account, "reply_count", 0))) + 1
         account.last_sent_time = time.time()
+        message_link = self._build_message_link(message)
 
         self.recent_replies.append({
             "timestamp": account.last_sent_time,
@@ -1011,6 +1012,7 @@ class DiscordManager:
             "keyword": keyword,
             "target": _get_message_author_label(message),
             "customer_message": getattr(message, "content", "") or "",
+            "message_link": message_link,
             "reply_content": reply_text,
         })
         if len(self.recent_replies) > self.max_recent_replies:

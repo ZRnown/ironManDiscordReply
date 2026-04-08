@@ -181,6 +181,10 @@ class AutoReplyClientMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["recent_replies"][0]["account_alias"], "sender#0001")
         self.assertEqual(status["recent_replies"][0]["keyword"], "hello")
         self.assertEqual(status["recent_replies"][0]["customer_message"], "hello there")
+        self.assertEqual(
+            status["recent_replies"][0]["message_link"],
+            "https://discord.com/channels/456/123/1001",
+        )
         self.assertEqual(status["recent_replies"][0]["reply_content"], "hi there")
 
     async def test_partial_match_requires_whole_keyword_boundaries(self):

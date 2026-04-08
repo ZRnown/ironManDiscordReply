@@ -1,12 +1,58 @@
 import json
 import os
+import re
 import sys
+from pathlib import Path
 from typing import List, Dict, Any
 
 # 添加src目录到Python路径（确保打包后能找到模块）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from discord_client import Account, Rule, MatchType, BlockSettings
+
+
+APP_STORAGE_FOLDER_NAME = "DiscordAutoReply"
+DEFAULT_INSTANCE_NAME = "default"
+
+
+def normalize_instance_name(instance_name: str | None) -> str:
+    cleaned_name = re.sub(r"[^A-Za-z0-9._-]+", "_", str(instance_name or "").strip())
+    cleaned_name = cleaned_name.strip("._-")
+    return cleaned_name or DEFAULT_INSTANCE_NAME
+
+
+def resolve_runtime_instance_name(instance_name: str | None = None) -> str:
+    requested_name = instance_name if instance_name is not None else os.environ.get("DISCORD_REPLY_INSTANCE", "")
+    normalized_name = str(requested_name or "").strip()
+    if not normalized_name:
+        return ""
+    return normalize_instance_name(normalized_name)
+
+
+def get_platform_data_root() -> str:
+    if sys.platform == "win32":
+        root_dir = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    elif sys.platform == "darwin":
+        root_dir = str(Path.home() / "Library" / "Application Support")
+    else:
+        root_dir = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return os.path.join(root_dir, APP_STORAGE_FOLDER_NAME)
+
+
+def resolve_runtime_config_dir(
+    config_dir: str | None = None,
+    instance_name: str | None = None,
+) -> str:
+    explicit_dir = str(config_dir or os.environ.get("DISCORD_REPLY_DATA_DIR", "")).strip()
+    if explicit_dir:
+        return os.path.abspath(os.path.expanduser(explicit_dir))
+
+    resolved_instance_name = resolve_runtime_instance_name(instance_name)
+    if resolved_instance_name:
+        return os.path.join(get_platform_data_root(), "instances", resolved_instance_name)
+
+    base_dir = str(config_dir or "config").strip() or "config"
+    return os.path.abspath(os.path.expanduser(base_dir))
 
 
 class ConfigManager:

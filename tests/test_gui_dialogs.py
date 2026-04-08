@@ -5,10 +5,12 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication, QAbstractItemView
 except ModuleNotFoundError:  # pragma: no cover - optional GUI dependency in test env
     QApplication = None
     QAbstractItemView = None
+    Qt = None
 
 from pathlib import Path
 import tempfile
@@ -177,6 +179,7 @@ class MainWindowReplyHistoryTests(GuiTestCase):
                 "account_alias": "sender#0001",
                 "keyword": f"keyword-{index}",
                 "customer_message": f"customer-{index}",
+                "message_link": f"https://discord.com/channels/456/123/{index}",
                 "reply_content": f"reply-{index}",
             }
             for index in range(25)
@@ -188,7 +191,12 @@ class MainWindowReplyHistoryTests(GuiTestCase):
         self.assertEqual(self.window.reply_history_page_label.text(), "第 1/2 页")
         self.assertEqual(self.window.reply_history_table.item(0, 2).text(), "keyword-24")
         self.assertEqual(self.window.reply_history_table.item(0, 3).text(), "customer-24")
-        self.assertEqual(self.window.reply_history_table.item(0, 4).text(), "reply-24")
+        self.assertEqual(self.window.reply_history_table.item(0, 4).text(), "打开消息")
+        self.assertEqual(
+            self.window.reply_history_table.item(0, 4).data(Qt.ItemDataRole.UserRole),
+            "https://discord.com/channels/456/123/24",
+        )
+        self.assertEqual(self.window.reply_history_table.item(0, 5).text(), "reply-24")
 
         self.window.show_next_reply_history_page()
 
@@ -203,17 +211,38 @@ class MainWindowReplyHistoryTests(GuiTestCase):
                 "account_alias": "sender#0001",
                 "keyword": "keyword-1",
                 "customer_message": "customer-1",
+                "message_link": "https://discord.com/channels/456/123/1001",
                 "reply_content": "reply-1",
             }
         ]
 
         self.window.update_status()
         self.window.reply_history_table.item(0, 3).setSelected(True)
-        self.window.reply_history_table.item(0, 4).setSelected(True)
+        self.window.reply_history_table.item(0, 5).setSelected(True)
 
         self.window.copy_selected_reply_history_text()
 
         self.assertEqual(QApplication.clipboard().text(), "customer-1\treply-1")
+
+    def test_clicking_reply_history_message_link_opens_url(self):
+        self.window.discord_manager.recent_replies = [
+            {
+                "time_text": "10:00",
+                "account_alias": "sender#0001",
+                "keyword": "keyword-1",
+                "customer_message": "customer-1",
+                "message_link": "https://discord.com/channels/456/123/1001",
+                "reply_content": "reply-1",
+            }
+        ]
+
+        self.window.update_status()
+
+        with patch("src.gui.QDesktopServices.openUrl") as open_mock:
+            self.window.open_reply_history_message_link(0, 4)
+
+        self.assertEqual(open_mock.call_count, 1)
+        self.assertEqual(open_mock.call_args[0][0].toString(), "https://discord.com/channels/456/123/1001")
 
 
 class MainWindowFollowFileSyncTests(GuiTestCase):
@@ -305,6 +334,19 @@ class MainWindowRuleSelectionTests(GuiTestCase):
 
     def test_rules_table_reply_count_column_shows_one_account(self):
         self.assertEqual(self.window.rules_table.item(0, 3).text(), "1个账号")
+
+    def test_apply_reply_account_count_to_all_rules_updates_every_rule(self):
+        self.window.bulk_reply_account_count_combo.setCurrentIndex(2)
+
+        with patch.object(self.window, "save_config") as save_mock, patch("src.gui.QMessageBox.information"):
+            self.window.apply_reply_account_count_to_all_rules()
+
+        self.assertTrue(save_mock.called)
+        self.assertEqual(
+            [rule.reply_account_count for rule in self.window.discord_manager.rules],
+            [3, 3, 3],
+        )
+        self.assertEqual(self.window.rules_table.item(0, 3).text(), "3个账号")
 
     def test_export_rules_to_csv_writes_table_headers(self):
         with tempfile.TemporaryDirectory() as temp_dir:
