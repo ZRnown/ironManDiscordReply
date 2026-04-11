@@ -67,6 +67,26 @@ class FakeMessageSender:
         return object()
 
 
+class FakeThreadChannel:
+    def __init__(self, thread_id, archived=False, locked=False):
+        self.id = thread_id
+        self.archived = archived
+        self.locked = locked
+        self.join_call_count = 0
+        self.edit_calls = []
+
+    async def join(self):
+        self.join_call_count += 1
+
+    async def edit(self, **kwargs):
+        self.edit_calls.append(kwargs)
+        if "archived" in kwargs:
+            self.archived = kwargs["archived"]
+        if "locked" in kwargs:
+            self.locked = kwargs["locked"]
+        return self
+
+
 class FakeRotationClient:
     def __init__(self, account, sender=None):
         self.account = account
@@ -79,13 +99,28 @@ class FakeRotationClient:
 
 
 class FakeMessage:
-    def __init__(self, channel_id=123, guild_id=456, message_id=789, author_id=321, author_name="Alice"):
+    def __init__(
+        self,
+        channel_id=123,
+        guild_id=456,
+        message_id=789,
+        author_id=321,
+        author_name="Alice",
+        thread=None,
+        fetch_thread_result=None,
+        create_thread_result=None,
+    ):
         self.id = message_id
         self.channel = SimpleNamespace(id=channel_id, name="general")
         self.guild = SimpleNamespace(id=guild_id)
         self.author = SimpleNamespace(id=author_id, name=author_name)
+        self.thread = thread
+        self.fetch_thread_result = fetch_thread_result
+        self.create_thread_result = create_thread_result
         self.reply_calls = []
         self.reference_calls = []
+        self.fetch_thread_calls = 0
+        self.create_thread_calls = []
 
     def to_reference(self, **kwargs):
         self.reference_calls.append(kwargs)
@@ -94,6 +129,24 @@ class FakeMessage:
     async def reply(self, content=None, **kwargs):
         self.reply_calls.append({"content": content, "kwargs": kwargs})
         return object()
+
+    async def fetch_thread(self):
+        self.fetch_thread_calls += 1
+        if isinstance(self.fetch_thread_result, Exception):
+            raise self.fetch_thread_result
+        if self.fetch_thread_result is None:
+            raise discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "missing thread")
+        self.thread = self.fetch_thread_result
+        return self.fetch_thread_result
+
+    async def create_thread(self, **kwargs):
+        self.create_thread_calls.append(kwargs)
+        if isinstance(self.create_thread_result, Exception):
+            raise self.create_thread_result
+        if self.create_thread_result is None:
+            self.create_thread_result = FakeThreadChannel(thread_id=self.id)
+        self.thread = self.create_thread_result
+        return self.create_thread_result
 
 
 def build_http_exception(code, message="request failed"):
@@ -239,6 +292,8 @@ class DiscordManagerStartupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message.reply_calls, [])
         self.assertEqual(client_one.sender.sent_messages, [])
         self.assertEqual(len(client_two.sender.sent_messages), 1)
+        self.assertEqual(message.create_thread_calls, [])
+        self.assertEqual(client_two.requests[0]["channel_id"], 222)
         self.assertEqual(client_two.sender.sent_messages[0]["content"], "hello world")
         self.assertEqual(
             client_two.sender.sent_messages[0]["kwargs"]["reference"],
@@ -246,6 +301,117 @@ class DiscordManagerStartupTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(client_two.sender.sent_messages[0]["kwargs"]["mention_author"])
         self.assertIn(999, self.manager.replied_messages)
+
+    async def test_send_rule_replies_creates_thread_and_sends_all_accounts_inside_it(self):
+        self.manager.reply_in_thread_mode = True
+        primary_account = Account(token="token-1", is_active=True, is_valid=True)
+        secondary_account = Account(token="token-2", is_active=True, is_valid=True)
+        self.manager.accounts = [primary_account, secondary_account]
+
+        primary_sender = FakeMessageSender()
+        secondary_sender = FakeMessageSender()
+        primary_client = FakeRotationClient(primary_account, sender=primary_sender)
+        secondary_client = FakeRotationClient(secondary_account, sender=secondary_sender)
+        self.manager.clients = [primary_client, secondary_client]
+
+        rule = Rule(
+            id="rule-1",
+            keywords=["hello"],
+            reply="inside thread",
+            match_type=MatchType.PARTIAL,
+            target_channels=[],
+            reply_account_count=2,
+        )
+        message = FakeMessage(
+            channel_id=222,
+            guild_id=333,
+            message_id=1010,
+            create_thread_result=FakeThreadChannel(thread_id=9010),
+        )
+
+        success_count = await self.manager.send_rule_replies(
+            message,
+            rule,
+            matched_keyword="hello",
+            preferred_account=primary_account,
+            preferred_client=primary_client,
+        )
+
+        self.assertEqual(success_count, 2)
+        self.assertEqual(message.reply_calls, [])
+        self.assertEqual(len(message.create_thread_calls), 1)
+        self.assertEqual(message.create_thread_calls[0]["name"], "回复-Alice-1010")
+        self.assertEqual(primary_client.requests[0]["channel_id"], 9010)
+        self.assertEqual(secondary_client.requests[0]["channel_id"], 9010)
+        self.assertEqual(primary_sender.sent_messages[0]["content"], "inside thread")
+        self.assertEqual(secondary_sender.sent_messages[0]["content"], "inside thread")
+        self.assertNotIn("reference", primary_sender.sent_messages[0]["kwargs"])
+        self.assertNotIn("reference", secondary_sender.sent_messages[0]["kwargs"])
+
+    async def test_send_rotated_reply_reuses_existing_thread(self):
+        self.manager.rotation_enabled = True
+        self.manager.reply_in_thread_mode = True
+        self.manager.accounts = [
+            Account(token="token-1", is_active=True, is_valid=True),
+        ]
+
+        sender = FakeMessageSender()
+        client = FakeRotationClient(self.manager.accounts[0], sender=sender)
+        self.manager.clients = [client]
+        existing_thread = FakeThreadChannel(thread_id=8001)
+        message = FakeMessage(
+            channel_id=222,
+            guild_id=333,
+            message_id=1000,
+            thread=existing_thread,
+        )
+
+        success = await self.manager.send_rotated_reply(message, "reply in existing thread")
+
+        self.assertTrue(success)
+        self.assertEqual(message.create_thread_calls, [])
+        self.assertEqual(client.requests[0]["channel_id"], 8001)
+        self.assertEqual(sender.sent_messages[0]["content"], "reply in existing thread")
+        self.assertNotIn("reference", sender.sent_messages[0]["kwargs"])
+
+    async def test_send_rule_replies_uses_normal_reply_when_thread_mode_disabled(self):
+        primary_account = Account(token="token-1", is_active=True, is_valid=True)
+        secondary_account = Account(token="token-2", is_active=True, is_valid=True)
+        self.manager.accounts = [primary_account, secondary_account]
+
+        secondary_sender = FakeMessageSender()
+        primary_client = FakeRotationClient(primary_account)
+        secondary_client = FakeRotationClient(secondary_account, sender=secondary_sender)
+        self.manager.clients = [primary_client, secondary_client]
+
+        rule = Rule(
+            id="rule-1",
+            keywords=["hello"],
+            reply="normal reply",
+            match_type=MatchType.PARTIAL,
+            target_channels=[],
+            reply_account_count=2,
+        )
+        message = FakeMessage(channel_id=222, guild_id=333, message_id=1011)
+
+        success_count = await self.manager.send_rule_replies(
+            message,
+            rule,
+            matched_keyword="hello",
+            preferred_account=primary_account,
+            preferred_client=primary_client,
+        )
+
+        self.assertEqual(success_count, 2)
+        self.assertEqual(message.create_thread_calls, [])
+        self.assertEqual(len(message.reply_calls), 1)
+        self.assertEqual(message.reply_calls[0]["content"], "normal reply")
+        self.assertEqual(len(secondary_sender.sent_messages), 1)
+        self.assertEqual(secondary_client.requests[0]["channel_id"], 222)
+        self.assertEqual(
+            secondary_sender.sent_messages[0]["kwargs"]["reference"],
+            {"message_id": 1011, "fail_if_not_exists": False},
+        )
 
     async def test_send_rotated_reply_tries_next_account_after_slowmode(self):
         self.manager.rotation_enabled = True

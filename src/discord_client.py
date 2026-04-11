@@ -239,6 +239,20 @@ def _build_reply_log_message(account_alias: str, message) -> str:
     return f"{account_alias} 回复了 {_get_message_author_label(message)}"
 
 
+def _build_reply_thread_name(message) -> str:
+    author_label = re.sub(r"\s+", " ", _get_message_author_label(message)).strip() or "用户"
+    author_label = author_label[:40]
+    message_id = str(getattr(message, "id", "") or "").strip()
+    base_name = f"回复-{author_label}"
+
+    if not message_id:
+        return base_name[:100]
+
+    max_base_length = max(1, 100 - len(message_id) - 1)
+    trimmed_base = base_name[:max_base_length].rstrip(" -")
+    return f"{trimmed_base}-{message_id}"[:100]
+
+
 def _normalize_match_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip())
 
@@ -545,10 +559,12 @@ class AutoReplyClient(discord.Client):
                     break
 
                 try:
+                    target_reply_count = max(1, min(3, int(getattr(rule, "reply_account_count", 1) or 1)))
                     # 检查是否启用轮换模式
                     if (self.discord_manager and
                         self.discord_manager.rotation_enabled and
-                        self.account.allows_channel(getattr(message.channel, "id", None))):
+                        self.account.allows_channel(getattr(message.channel, "id", None)) and
+                        target_reply_count == 1):
                         # 使用轮换模式
                         await self.discord_manager.send_rotated_reply(
                             message,
@@ -863,6 +879,7 @@ class DiscordManager:
         self.rotation_enabled: bool = False  # 是否启用账号轮换
         self.rotation_interval: int = 10  # 轮换间隔（秒），默认10秒
         self.current_rotation_index: int = 0  # 当前使用的账号索引
+        self.reply_in_thread_mode: bool = False  # 是否启用子区回复模式
 
         # 消息去重跟踪 - 存储已回复的消息ID，避免重复回复
         self.replied_messages: Set[int] = set()
@@ -957,6 +974,89 @@ class DiscordManager:
     def _find_client_for_account(self, account: Account) -> Optional[AutoReplyClient]:
         return next((client for client in self.clients if client.account.token == account.token), None)
 
+    async def _prepare_reply_thread(self, thread):
+        if thread is None:
+            return None
+
+        if getattr(thread, "locked", False):
+            return None
+
+        if getattr(thread, "archived", False) and not getattr(thread, "locked", False):
+            edit_method = getattr(thread, "edit", None)
+            if callable(edit_method):
+                try:
+                    thread = await edit_method(archived=False)
+                except Exception:
+                    pass
+
+        join_method = getattr(thread, "join", None)
+        if callable(join_method):
+            try:
+                await join_method()
+            except Exception:
+                pass
+
+        return thread
+
+    async def _get_existing_reply_thread(self, message):
+        thread = getattr(message, "thread", None)
+        if thread is not None:
+            return await self._prepare_reply_thread(thread)
+
+        fetch_thread = getattr(message, "fetch_thread", None)
+        if not callable(fetch_thread):
+            return None
+
+        try:
+            thread = await fetch_thread()
+        except (discord.NotFound, ValueError):
+            return None
+        except Exception:
+            return None
+
+        return await self._prepare_reply_thread(thread)
+
+    async def _ensure_reply_thread(self, message):
+        existing_thread = await self._get_existing_reply_thread(message)
+        if existing_thread is not None:
+            return existing_thread
+
+        create_thread = getattr(message, "create_thread", None)
+        if not callable(create_thread):
+            return None
+
+        try:
+            thread = await create_thread(name=_build_reply_thread_name(message))
+        except Exception:
+            return await self._get_existing_reply_thread(message)
+
+        return await self._prepare_reply_thread(thread)
+
+    def _get_rotation_ordered_accounts(self, candidate_accounts: List[Account]) -> List[Account]:
+        if not candidate_accounts:
+            return []
+
+        start_index = self.current_rotation_index % len(candidate_accounts)
+        return candidate_accounts[start_index:] + candidate_accounts[:start_index]
+
+    def _mark_rotation_cooldown(self, account: Account, sent_time: Optional[float] = None):
+        if not self.rotation_enabled:
+            return
+
+        if self.rotation_interval > 0:
+            account.cooldown_until = (sent_time or time.time()) + self.rotation_interval
+        else:
+            account.cooldown_until = None
+
+    def _advance_rotation_index_after_account(self, candidate_accounts: List[Account], account: Account):
+        if not self.rotation_enabled or not candidate_accounts:
+            return
+
+        for index, candidate in enumerate(candidate_accounts):
+            if candidate.token == account.token:
+                self.current_rotation_index = (index + 1) % len(candidate_accounts)
+                return
+
     def _trim_replied_messages(self):
         if len(self.replied_messages) <= self.max_replied_messages:
             return
@@ -1029,12 +1129,31 @@ class DiscordManager:
         *,
         client=None,
         use_message_reply: bool = False,
+        reply_thread=None,
     ) -> bool:
         current_time = time.time()
         if not self._can_account_send_now(account, current_time):
             return False
 
         try:
+            if reply_thread is not None:
+                if use_message_reply and hasattr(reply_thread, "send"):
+                    await reply_thread.send(reply_text, mention_author=False)
+                    return True
+
+                client = client or self._find_client_for_account(account)
+                if client is None:
+                    return False
+
+                thread_id = getattr(reply_thread, "id", None)
+                guild_id = getattr(getattr(message, "guild", None), "id", None)
+                if thread_id is None:
+                    return False
+
+                target_channel = client.get_partial_messageable(thread_id, guild_id=guild_id)
+                await target_channel.send(reply_text, mention_author=False)
+                return True
+
             if use_message_reply:
                 await message.reply(reply_text)
                 return True
@@ -1079,6 +1198,36 @@ class DiscordManager:
         preferred_account: Optional[Account] = None,
         preferred_client=None,
     ) -> int:
+        if self.rotation_enabled:
+            if self.rotation_lock is None:
+                self.rotation_lock = asyncio.Lock()
+
+            async with self.rotation_lock:
+                return await self._send_rule_replies_locked(
+                    message,
+                    rule,
+                    matched_keyword=matched_keyword,
+                    preferred_account=preferred_account,
+                    preferred_client=preferred_client,
+                )
+
+        return await self._send_rule_replies_locked(
+            message,
+            rule,
+            matched_keyword=matched_keyword,
+            preferred_account=preferred_account,
+            preferred_client=preferred_client,
+        )
+
+    async def _send_rule_replies_locked(
+        self,
+        message,
+        rule: Rule,
+        *,
+        matched_keyword: str,
+        preferred_account: Optional[Account] = None,
+        preferred_client=None,
+    ) -> int:
         reply_key = (getattr(message, "id", 0), rule.id)
         reply_lock = self.reply_locks.setdefault(reply_key, asyncio.Lock())
 
@@ -1094,19 +1243,24 @@ class DiscordManager:
             if not candidate_accounts:
                 return 0
 
-            ordered_accounts: List[Account] = []
-            if preferred_account is not None:
+            reply_thread = await self._ensure_reply_thread(message) if self.reply_in_thread_mode else None
+            if self.rotation_enabled:
+                ordered_accounts = self._get_rotation_ordered_accounts(candidate_accounts)
+            else:
+                ordered_accounts = []
+                if preferred_account is not None:
+                    ordered_accounts.extend(
+                        account for account in candidate_accounts
+                        if account.token == preferred_account.token
+                    )
                 ordered_accounts.extend(
                     account for account in candidate_accounts
-                    if account.token == preferred_account.token
+                    if preferred_account is None or account.token != preferred_account.token
                 )
-            ordered_accounts.extend(
-                account for account in candidate_accounts
-                if preferred_account is None or account.token != preferred_account.token
-            )
 
             success_count = 0
             primary_token = preferred_account.token if preferred_account is not None else None
+            last_success_account: Optional[Account] = None
 
             for account in ordered_accounts:
                 if account.token in already_replied_tokens:
@@ -1120,12 +1274,14 @@ class DiscordManager:
                         rule.reply,
                         client=preferred_client,
                         use_message_reply=True,
+                        reply_thread=reply_thread,
                     )
                 else:
                     send_success = await self._send_reply_with_account(
                         account,
                         message,
                         rule.reply,
+                        reply_thread=reply_thread,
                     )
 
                 if not send_success:
@@ -1133,11 +1289,17 @@ class DiscordManager:
 
                 self._remember_rule_reply(reply_key, account.token)
                 already_replied_tokens.add(account.token)
+                sent_time = time.time()
+                self._mark_rotation_cooldown(account, sent_time=sent_time)
                 self._record_reply(account, message, matched_keyword, rule.reply)
                 success_count += 1
+                last_success_account = account
 
                 if len(already_replied_tokens) >= target_reply_count:
                     break
+
+            if last_success_account is not None:
+                self._advance_rotation_index_after_account(candidate_accounts, last_success_account)
 
             return success_count
 
@@ -1361,6 +1523,7 @@ class DiscordManager:
         start_index = self.current_rotation_index % len(available_accounts)
         message_reference = self._build_message_reference(message)
         guild_id = getattr(getattr(message, "guild", None), "id", None)
+        reply_thread = await self._ensure_reply_thread(message) if self.reply_in_thread_mode else None
 
         for offset in range(len(available_accounts)):
             account_index = (start_index + offset) % len(available_accounts)
@@ -1377,9 +1540,10 @@ class DiscordManager:
                 continue
 
             try:
-                target_channel = client.get_partial_messageable(channel_id, guild_id=guild_id)
+                target_channel_id = getattr(reply_thread, "id", None) if reply_thread is not None else channel_id
+                target_channel = client.get_partial_messageable(target_channel_id, guild_id=guild_id)
                 send_kwargs = {"mention_author": False}
-                if message_reference is not None:
+                if reply_thread is None and message_reference is not None:
                     send_kwargs["reference"] = message_reference
                 await target_channel.send(reply_text, **send_kwargs)
 

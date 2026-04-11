@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 import re
@@ -36,10 +35,10 @@ def build_packaged_instance_name(executable_path: str) -> str:
     return normalize_instance_name(Path(executable_path).stem)
 
 
-def build_packaged_storage_key(executable_path: str) -> str:
-    normalized_executable_path = os.path.normcase(os.path.abspath(executable_path))
-    path_digest = hashlib.sha1(normalized_executable_path.encode("utf-8")).hexdigest()[:8]
-    return f"{build_packaged_instance_name(executable_path)}_{path_digest}"
+def build_packaged_data_dir(executable_path: str) -> str:
+    executable_dir = os.path.dirname(executable_path)
+    executable_stem = Path(executable_path).stem
+    return os.path.join(executable_dir, f"{executable_stem}_data")
 
 
 def resolve_runtime_instance_name(instance_name: str | None = None, prefer_packaged_default: bool = False) -> str:
@@ -78,7 +77,7 @@ def resolve_runtime_config_dir(
 
     executable_path = get_frozen_executable_path()
     if executable_path:
-        return os.path.join(get_platform_data_root(), "portable", build_packaged_storage_key(executable_path))
+        return build_packaged_data_dir(executable_path)
 
     base_dir = str(config_dir or "config").strip() or "config"
     return os.path.abspath(os.path.expanduser(base_dir))
@@ -89,6 +88,7 @@ class ConfigManager:
         self.config_dir = config_dir
         self.config_file = os.path.join(config_dir, "config.json")
         self.external_rule_sync_settings = self._default_external_rule_sync_settings()
+        self.reply_in_thread_mode = False
         self.ensure_config_dir()
 
     def ensure_config_dir(self):
@@ -223,12 +223,16 @@ class ConfigManager:
         rules: List[Rule],
         block_settings: BlockSettings,
         external_rule_sync_settings: Dict[str, Any] | None = None,
+        reply_in_thread_mode: bool | None = None,
     ):
         """保存配置到文件"""
         normalized_sync_settings = self._normalize_external_rule_sync_settings(
             external_rule_sync_settings if external_rule_sync_settings is not None else self.external_rule_sync_settings
         )
         self.external_rule_sync_settings = normalized_sync_settings
+        self.reply_in_thread_mode = bool(
+            self.reply_in_thread_mode if reply_in_thread_mode is None else reply_in_thread_mode
+        )
         config_data = {
             "accounts": [
                 {
@@ -245,6 +249,7 @@ class ConfigManager:
                 }
                 for acc in accounts
             ],
+            "reply_in_thread_mode": self.reply_in_thread_mode,
             "block_settings": {
                 "blocked_keywords": block_settings.blocked_keywords,
                 "blocked_user_ids": block_settings.blocked_user_ids,
@@ -286,6 +291,7 @@ class ConfigManager:
     def load_config(self) -> tuple[List[Account], List[Rule], BlockSettings]:
         """从文件加载配置"""
         if not os.path.exists(self.config_file):
+            self.reply_in_thread_mode = False
             return [], [], BlockSettings()
 
         try:
@@ -297,6 +303,7 @@ class ConfigManager:
             self.external_rule_sync_settings = self._normalize_external_rule_sync_settings(
                 config_data.get("external_rule_sync_settings", {})
             )
+            self.reply_in_thread_mode = bool(config_data.get("reply_in_thread_mode", False))
             rules = []
             legacy_blocked_keywords = []
             for rule_data in rules_data:
@@ -383,6 +390,7 @@ class ConfigManager:
         except Exception as e:
             print(f"加载配置失败: {e}")
             self.external_rule_sync_settings = self._default_external_rule_sync_settings()
+            self.reply_in_thread_mode = False
             return [], [], BlockSettings()
 
     def export_config(self, filepath: str, accounts: List[Account], rules: List[Rule], block_settings: BlockSettings) -> bool:
@@ -400,6 +408,7 @@ class ConfigManager:
                     }
                     for acc in accounts
                 ],
+                "reply_in_thread_mode": self.reply_in_thread_mode,
                 "block_settings": {
                     "blocked_keywords": block_settings.blocked_keywords,
                     "blocked_user_ids": block_settings.blocked_user_ids,
@@ -447,6 +456,7 @@ class ConfigManager:
             self.external_rule_sync_settings = self._normalize_external_rule_sync_settings(
                 config_data.get("external_rule_sync_settings", {})
             )
+            self.reply_in_thread_mode = bool(config_data.get("reply_in_thread_mode", False))
             rules = []
             legacy_blocked_keywords = []
             for rule_data in rules_data:
@@ -532,4 +542,5 @@ class ConfigManager:
 
         except Exception as e:
             print(f"导入配置失败: {e}")
+            self.reply_in_thread_mode = False
             return [], [], BlockSettings()

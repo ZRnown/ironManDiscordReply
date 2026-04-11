@@ -261,6 +261,27 @@ class AutoReplyClientMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(secondary_client.channel.send_calls), 1)
         self.assertEqual(secondary_client.channel.send_calls[0]["content"], "hi there")
 
+    async def test_rotation_mode_still_honors_two_account_reply_count(self):
+        secondary_account = Account(
+            token="token-2",
+            is_active=True,
+            is_valid=True,
+            user_info={"name": "backup", "discriminator": "0002"},
+        )
+        secondary_client = FakeSecondaryClient(secondary_account)
+        self.manager.accounts = [self.account, secondary_account]
+        self.manager.clients = [self.client, secondary_client]
+        self.manager.rotation_enabled = True
+        self.rule.reply_account_count = 2
+
+        message = FakeInboundMessage(content="hello there", author_name="Alice", channel_id=123, message_id=1003)
+
+        with patch("src.discord_client.asyncio.sleep", new=AsyncMock()):
+            await self.client.on_message(message)
+
+        self.assertEqual(len(message.reply_calls), 1)
+        self.assertEqual(len(secondary_client.channel.send_calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

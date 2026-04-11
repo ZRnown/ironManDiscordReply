@@ -164,6 +164,38 @@ class MainWindowAccountCooldownTests(GuiTestCase):
         self.assertEqual(self.window.accounts_table.item(0, 2).text(), "全部(2)")
 
 
+class MainWindowReplyThreadModeTests(GuiTestCase):
+    def setUp(self):
+        with patch.object(MainWindow, "load_config", autospec=True):
+            self.window = MainWindow()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+
+    def test_reply_thread_mode_checkbox_toggles_manager_setting(self):
+        with patch.object(self.window, "save_config", autospec=True) as save_mock:
+            self.window.reply_thread_mode_checkbox.setChecked(True)
+
+        self.assertTrue(self.window.discord_manager.reply_in_thread_mode)
+        self.assertTrue(self.window.reply_thread_mode_checkbox.isChecked())
+        self.assertTrue(save_mock.called)
+
+    def test_load_config_applies_reply_thread_mode_setting(self):
+        self.window.config_manager.reply_in_thread_mode = True
+        self.window.config_manager.external_rule_sync_settings = self.window.default_external_rule_sync_settings()
+
+        with patch.object(
+            self.window.config_manager,
+            "load_config",
+            return_value=([], [], self.window.discord_manager.block_settings),
+        ):
+            self.window.load_config()
+
+        self.assertTrue(self.window.reply_thread_mode_checkbox.isChecked())
+        self.assertTrue(self.window.discord_manager.reply_in_thread_mode)
+
+
 class MainWindowReplyHistoryTests(GuiTestCase):
     def setUp(self):
         with patch.object(MainWindow, "load_config", autospec=True):
@@ -261,11 +293,12 @@ class MainWindowStorageStatusTests(GuiTestCase):
         ), patch.object(
             sys,
             "executable",
-            os.path.join("C:\\Apps", "DiscordAutoReply-A.exe"),
+            os.path.join("/tmp", "DiscordAutoReply-A.exe"),
         ):
             self.window = MainWindow()
 
         self.assertIn("当前实例: DiscordAutoReply-A", self.window.data_dir_label.text())
+        self.assertIn("当前数据目录: /tmp/DiscordAutoReply-A_data", self.window.data_dir_label.text())
 
 
 class MainWindowFollowFileSyncTests(GuiTestCase):
@@ -310,6 +343,35 @@ class MainWindowFollowFileSyncTests(GuiTestCase):
             self.assertEqual(len(self.window.discord_manager.rules), 1)
             self.assertEqual(self.window.discord_manager.rules[0].keywords, ["alpha"])
             self.assertEqual(self.window.discord_manager.rules[0].reply, "reply-a-updated")
+
+    def test_sync_rules_from_follow_xlsx_reuses_existing_manual_rule_instead_of_duplicating(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            xlsx_path = Path(temp_dir) / "follow.xlsx"
+            build_test_xlsx(
+                xlsx_path,
+                [
+                    ("alpha", "reply-a"),
+                ],
+            )
+
+            self.window.discord_manager.rules = [
+                Rule(
+                    id="manual-1",
+                    keywords=["alpha"],
+                    reply="reply-a",
+                    match_type=MatchType.PARTIAL,
+                    target_channels=[],
+                )
+            ]
+            self.window.external_rule_sync_settings["enabled"] = True
+            self.window.external_rule_sync_settings["file_path"] = str(xlsx_path)
+            self.window.external_rule_sync_settings["interval_seconds"] = 30
+
+            self.window.sync_rules_from_follow_file(force=True)
+
+            self.assertEqual(len(self.window.discord_manager.rules), 1)
+            self.assertEqual(self.window.discord_manager.rules[0].id, "manual-1")
+            self.assertEqual(getattr(self.window.discord_manager.rules[0], "sync_source", ""), "follow_file")
 
 
 class MainWindowRuleSelectionTests(GuiTestCase):

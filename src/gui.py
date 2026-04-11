@@ -1821,6 +1821,11 @@ class MainWindow(QMainWindow):
         rotation_group = QGroupBox("账号轮换设置")
         rotation_layout = QVBoxLayout(rotation_group)
 
+        self.reply_thread_mode_checkbox = QCheckBox("启用子区回复模式")
+        self.reply_thread_mode_checkbox.setToolTip("开启后，命中消息会优先复用已有子区，没有则新建子区后在子区里回复；关闭后按普通回复方式发送。")
+        self.reply_thread_mode_checkbox.stateChanged.connect(self.on_reply_thread_mode_changed)
+        rotation_layout.addWidget(self.reply_thread_mode_checkbox)
+
         # 启用轮换
         self.rotation_enabled_checkbox = QCheckBox("启用账号轮换")
         self.rotation_enabled_checkbox.setToolTip("启用后，每次只会由一个账号发送，发送后进入冷却，下次自动切换到没冷却的账号。")
@@ -1916,10 +1921,12 @@ class MainWindow(QMainWindow):
         self.discord_manager.accounts = accounts
         self.discord_manager.rules = rules
         self.discord_manager.block_settings = block_settings
+        self.discord_manager.reply_in_thread_mode = bool(self.config_manager.reply_in_thread_mode)
         self.external_rule_sync_settings = self.normalize_external_rule_sync_settings(
             self.config_manager.external_rule_sync_settings
         )
         self.apply_external_rule_sync_settings_to_ui()
+        self.apply_reply_thread_mode_to_ui()
 
         # 加载轮换设置（暂时使用默认值，后续可以扩展配置文件）
         # TODO: 从配置文件加载轮换设置
@@ -1940,6 +1947,7 @@ class MainWindow(QMainWindow):
             self.discord_manager.rules,
             self.discord_manager.block_settings,
             external_rule_sync_settings=self.external_rule_sync_settings,
+            reply_in_thread_mode=self.discord_manager.reply_in_thread_mode,
         )
 
     def default_external_rule_sync_settings(self):
@@ -2042,6 +2050,10 @@ class MainWindow(QMainWindow):
             if str(keyword).strip()
         )
 
+    @staticmethod
+    def _normalize_follow_rule_reply(reply: str) -> str:
+        return str(reply or "").strip()
+
     def _build_external_rule_sync_signature(self, imported_rules: List[dict]) -> str:
         payload = "\n".join(
             f"{chr(31).join(item.get('keywords', []))}{chr(30)}{item.get('reply', '')}"
@@ -2103,11 +2115,23 @@ class MainWindow(QMainWindow):
             existing_follow_rule_map[(keyword_key, occurrence_index)] = rule
             existing_occurrence_map[keyword_key] = occurrence_index + 1
 
+        manual_rule_map = {}
+        manual_occurrence_map = {}
+        for rule in manual_rules:
+            keyword_key = self._normalize_follow_rule_keywords(rule.keywords)
+            reply_key = self._normalize_follow_rule_reply(rule.reply)
+            occurrence_key = (keyword_key, reply_key)
+            occurrence_index = manual_occurrence_map.get(occurrence_key, 0)
+            manual_rule_map[(keyword_key, reply_key, occurrence_index)] = rule
+            manual_occurrence_map[occurrence_key] = occurrence_index + 1
+
         synced_rules = []
         imported_occurrence_map = {}
+        imported_manual_occurrence_map = {}
+        reused_manual_rule_ids = set()
         for item in imported_rules:
             keywords = [keyword.strip() for keyword in item.get("keywords", []) if keyword.strip()]
-            reply_text = str(item.get("reply", "") or "").strip()
+            reply_text = self._normalize_follow_rule_reply(item.get("reply", ""))
             if not keywords or not reply_text:
                 continue
 
@@ -2128,6 +2152,24 @@ class MainWindow(QMainWindow):
                 synced_rules.append(existing_rule)
                 continue
 
+            manual_occurrence_key = (keyword_key, reply_text)
+            manual_occurrence_index = imported_manual_occurrence_map.get(manual_occurrence_key, 0)
+            imported_manual_occurrence_map[manual_occurrence_key] = manual_occurrence_index + 1
+
+            existing_manual_rule = manual_rule_map.get((keyword_key, reply_text, manual_occurrence_index))
+            if existing_manual_rule is not None:
+                existing_manual_rule.keywords = keywords
+                existing_manual_rule.reply = reply_text
+                existing_manual_rule.match_type = MatchType.PARTIAL
+                existing_manual_rule.target_channels = []
+                existing_manual_rule.delay_min = 0.0
+                existing_manual_rule.delay_max = 0.0
+                existing_manual_rule.case_sensitive = False
+                existing_manual_rule.sync_source = "follow_file"
+                synced_rules.append(existing_manual_rule)
+                reused_manual_rule_ids.add(existing_manual_rule.id)
+                continue
+
             synced_rules.append(Rule(
                 id=f"follow_{int(time.time() * 1000)}_{len(synced_rules)}",
                 keywords=keywords,
@@ -2144,6 +2186,9 @@ class MainWindow(QMainWindow):
                 reply_account_count=1,
                 sync_source="follow_file",
             ))
+
+        if reused_manual_rule_ids:
+            manual_rules = [rule for rule in manual_rules if rule.id not in reused_manual_rule_ids]
 
         self.discord_manager.rules = manual_rules + synced_rules
 
@@ -3497,6 +3542,19 @@ class MainWindow(QMainWindow):
         """切换自动滚动"""
         self.auto_scroll_log = state == 2  # 2表示选中状态
 
+    def apply_reply_thread_mode_to_ui(self):
+        enabled = bool(getattr(self.discord_manager, "reply_in_thread_mode", False))
+        self.reply_thread_mode_checkbox.blockSignals(True)
+        self.reply_thread_mode_checkbox.setChecked(enabled)
+        self.reply_thread_mode_checkbox.blockSignals(False)
+
+    def on_reply_thread_mode_changed(self, state):
+        enabled = state == 2
+        self.discord_manager.reply_in_thread_mode = enabled
+        self.save_config()
+        status = "启用" if enabled else "禁用"
+        self.add_log(f"子区回复模式已{status}", "info")
+
     def on_rotation_enabled_changed(self, state):
         """轮换启用状态改变"""
         enabled = state == 2  # 2表示选中状态
@@ -3558,6 +3616,7 @@ class MainWindow(QMainWindow):
             if (
                 accounts or
                 rules or
+                self.config_manager.reply_in_thread_mode or
                 block_settings.blocked_keywords or
                 block_settings.blocked_user_ids or
                 block_settings.blocked_channel_ids or
@@ -3569,10 +3628,12 @@ class MainWindow(QMainWindow):
                 self.discord_manager.accounts = accounts
                 self.discord_manager.rules = rules
                 self.discord_manager.block_settings = block_settings
+                self.discord_manager.reply_in_thread_mode = bool(self.config_manager.reply_in_thread_mode)
                 self.external_rule_sync_settings = self.normalize_external_rule_sync_settings(
                     self.config_manager.external_rule_sync_settings
                 )
                 self.apply_external_rule_sync_settings_to_ui()
+                self.apply_reply_thread_mode_to_ui()
                 self.prune_block_settings_account_tokens()
                 self.update_accounts_list()
                 self.update_rules_list()

@@ -91,6 +91,23 @@ class ConfigManagerBlockSettingsTests(unittest.TestCase):
             self.assertFalse(loaded_block_settings.ignore_mentions)
             self.assertFalse(loaded_block_settings.case_sensitive)
 
+    def test_saves_and_loads_reply_thread_mode_setting(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ConfigManager(config_dir=temp_dir)
+
+            self.assertTrue(
+                manager.save_config(
+                    [],
+                    [],
+                    BlockSettings(),
+                    reply_in_thread_mode=True,
+                )
+            )
+
+            manager.load_config()
+
+            self.assertTrue(manager.reply_in_thread_mode)
+
     def test_saves_and_loads_external_rule_sync_settings(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = ConfigManager(config_dir=temp_dir)
@@ -239,12 +256,11 @@ class RuntimeConfigPathTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True), patch.object(sys, "frozen", True, create=True), patch.object(
             sys,
             "executable",
-            os.path.join("C:\\Apps", "DiscordAutoReply-A.exe"),
+            os.path.join("/tmp", "DiscordAutoReply-A.exe"),
         ):
             config_dir = resolve_runtime_config_dir()
 
-        self.assertIn(os.path.join("DiscordAutoReply", "portable"), config_dir)
-        self.assertRegex(os.path.basename(config_dir), r"DiscordAutoReply-A_[0-9a-f]{8}")
+        self.assertEqual(config_dir, os.path.join("/tmp", "DiscordAutoReply-A_data"))
 
 
 if __name__ == "__main__":
