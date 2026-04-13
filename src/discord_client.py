@@ -148,6 +148,8 @@ class BlockSettings:
     account_tokens: List[str] = field(default_factory=list)
     ignore_replies: bool = True
     ignore_mentions: bool = True
+    reply_delay_min: float = 0.0
+    reply_delay_max: float = 0.0
     case_sensitive: bool = False
 
     def __post_init__(self):
@@ -155,6 +157,10 @@ class BlockSettings:
         self.blocked_user_ids = self._normalize_values(self.blocked_user_ids)
         self.blocked_channel_ids = Account._normalize_channel_ids(self.blocked_channel_ids)
         self.account_tokens = self._normalize_values(self.account_tokens)
+        self.reply_delay_min, self.reply_delay_max = self._normalize_delay_range(
+            self.reply_delay_min,
+            self.reply_delay_max,
+        )
         self.case_sensitive = False
         if self.account_scope not in {"all", "selected"}:
             self.account_scope = "all"
@@ -172,6 +178,24 @@ class BlockSettings:
             seen_values.add(cleaned_value)
 
         return normalized_values
+
+    @staticmethod
+    def _normalize_delay_range(delay_min: Optional[float], delay_max: Optional[float]) -> tuple[float, float]:
+        try:
+            normalized_min = float(delay_min)
+        except (TypeError, ValueError):
+            normalized_min = 0.0
+
+        try:
+            normalized_max = float(delay_max)
+        except (TypeError, ValueError):
+            normalized_max = 0.0
+
+        normalized_min = max(0.0, normalized_min)
+        normalized_max = max(0.0, normalized_max)
+        if normalized_max < normalized_min:
+            normalized_min, normalized_max = normalized_max, normalized_min
+        return normalized_min, normalized_max
 
     def applies_to_account(self, account: Account) -> bool:
         if self.account_scope != "selected":
@@ -217,6 +241,13 @@ class BlockSettings:
 
     def should_ignore_mention_message(self, mentions) -> bool:
         return self.ignore_mentions and bool(mentions)
+
+    def choose_reply_delay_seconds(self) -> float:
+        if self.reply_delay_min <= 0 and self.reply_delay_max <= 0:
+            return 0.0
+        if self.reply_delay_min == self.reply_delay_max:
+            return self.reply_delay_min
+        return random.uniform(self.reply_delay_min, self.reply_delay_max)
 
 
 def _get_message_author_label(message) -> str:
@@ -581,6 +612,7 @@ class AutoReplyClient(discord.Client):
                         )
                     else:
                         # 使用普通回复
+                        await self._wait_before_direct_reply_if_needed()
                         await message.reply(rule.reply)
                         success_msg = _build_reply_log_message(self.account.alias, message)
                         print(success_msg)
@@ -654,6 +686,15 @@ class AutoReplyClient(discord.Client):
         content = getattr(message, "content", "") or ""
         channel_id = getattr(getattr(message, "channel", None), "id", None)
         return block_settings.should_block_message(self.account, content, author_id, channel_id=channel_id)
+
+    async def _wait_before_direct_reply_if_needed(self):
+        block_settings = self._get_block_settings()
+        if block_settings is None:
+            return
+
+        delay_seconds = block_settings.choose_reply_delay_seconds()
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
 
     async def start_client(self):
         self.is_running = False
@@ -895,6 +936,15 @@ class DiscordManager:
         self.message_rule_matches: Dict[Tuple[int, str], Dict[str, str]] = {}
         self.message_rule_match_order: List[Tuple[int, str]] = []
         self.max_message_rule_matches: int = 2000
+
+    async def _wait_before_reply_if_needed(self):
+        block_settings = getattr(self, "block_settings", None)
+        if block_settings is None:
+            return
+
+        delay_seconds = block_settings.choose_reply_delay_seconds()
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
 
     def invalidate_rule_matcher(self):
         self.rule_matcher = None
@@ -1243,6 +1293,7 @@ class DiscordManager:
             if not candidate_accounts:
                 return 0
 
+            await self._wait_before_reply_if_needed()
             reply_thread = await self._ensure_reply_thread(message) if self.reply_in_thread_mode else None
             if self.rotation_enabled:
                 ordered_accounts = self._get_rotation_ordered_accounts(candidate_accounts)
@@ -1520,6 +1571,7 @@ class DiscordManager:
                 self.log_callback("❌ 没有可用于当前频道的轮换账号")
             return False
 
+        await self._wait_before_reply_if_needed()
         start_index = self.current_rotation_index % len(available_accounts)
         message_reference = self._build_message_reference(message)
         guild_id = getattr(getattr(message, "guild", None), "id", None)

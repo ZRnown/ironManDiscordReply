@@ -1,10 +1,10 @@
 import asyncio
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
 
 import discord
-from src.discord_client import Account, DiscordManager, MatchType, Rule
+from src.discord_client import Account, BlockSettings, DiscordManager, MatchType, Rule
 
 
 class FakeClient:
@@ -373,6 +373,32 @@ class DiscordManagerStartupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.requests[0]["channel_id"], 8001)
         self.assertEqual(sender.sent_messages[0]["content"], "reply in existing thread")
         self.assertNotIn("reference", sender.sent_messages[0]["kwargs"])
+
+    async def test_send_rotated_reply_waits_for_random_global_delay(self):
+        self.manager.rotation_enabled = True
+        self.manager.block_settings = BlockSettings(
+            reply_delay_min=1.0,
+            reply_delay_max=4.0,
+        )
+        self.manager.accounts = [
+            Account(token="token-1", is_active=True, is_valid=True),
+        ]
+        sender = FakeMessageSender()
+        self.manager.clients = [
+            FakeRotationClient(self.manager.accounts[0], sender=sender),
+        ]
+        message = FakeMessage(channel_id=222, guild_id=333, message_id=1005)
+
+        sleep_mock = AsyncMock()
+        with patch("src.discord_client.random.uniform", return_value=2.5), patch(
+            "src.discord_client.asyncio.sleep",
+            new=sleep_mock,
+        ):
+            success = await self.manager.send_rotated_reply(message, "delayed reply")
+
+        self.assertTrue(success)
+        sleep_mock.assert_awaited_once_with(2.5)
+        self.assertEqual(sender.sent_messages[0]["content"], "delayed reply")
 
     async def test_send_rule_replies_uses_normal_reply_when_thread_mode_disabled(self):
         primary_account = Account(token="token-1", is_active=True, is_valid=True)

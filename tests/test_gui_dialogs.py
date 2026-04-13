@@ -19,7 +19,7 @@ import tempfile
 from src.discord_client import Account, MatchType, Rule
 from tests.test_gui_helpers import build_test_xlsx
 if QApplication is not None:
-    from src.gui import MainWindow, RuleDialog
+    from src.gui import BlockSettingsDialog, MainWindow, RuleDialog
 
 
 @unittest.skipIf(QApplication is None, "PySide6 is not installed in this test environment")
@@ -194,6 +194,23 @@ class MainWindowReplyThreadModeTests(GuiTestCase):
 
         self.assertTrue(self.window.reply_thread_mode_checkbox.isChecked())
         self.assertTrue(self.window.discord_manager.reply_in_thread_mode)
+
+
+class BlockSettingsDialogTests(GuiTestCase):
+    def tearDown(self):
+        if hasattr(self, "dialog"):
+            self.dialog.close()
+            self.dialog.deleteLater()
+
+    def test_block_settings_dialog_returns_global_reply_delay_range(self):
+        self.dialog = BlockSettingsDialog()
+        self.dialog.reply_delay_min_spin.setValue(2.5)
+        self.dialog.reply_delay_max_spin.setValue(6.5)
+
+        settings = self.dialog.get_block_settings()
+
+        self.assertEqual(settings.reply_delay_min, 2.5)
+        self.assertEqual(settings.reply_delay_max, 6.5)
 
 
 class MainWindowReplyHistoryTests(GuiTestCase):

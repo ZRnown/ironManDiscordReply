@@ -169,6 +169,23 @@ class AutoReplyClientMessageTests(unittest.IsolatedAsyncioTestCase):
         sleep_mock.assert_not_awaited()
         self.assertEqual(message.channel.typing_call_count, 0)
 
+    async def test_reply_waits_for_random_global_delay_before_sending(self):
+        self.manager.block_settings = BlockSettings(
+            reply_delay_min=2.0,
+            reply_delay_max=5.0,
+        )
+        message = FakeInboundMessage(content="hello there", author_name="Alice")
+
+        sleep_mock = AsyncMock()
+        with patch("src.discord_client.random.uniform", return_value=3.25), patch(
+            "src.discord_client.asyncio.sleep",
+            new=sleep_mock,
+        ):
+            await self.client.on_message(message)
+
+        sleep_mock.assert_awaited_once_with(3.25)
+        self.assertEqual(len(message.reply_calls), 1)
+
     async def test_reply_updates_reply_count_and_recent_history(self):
         message = FakeInboundMessage(content="hello there", author_name="Alice", channel_id=123, message_id=1001)
 

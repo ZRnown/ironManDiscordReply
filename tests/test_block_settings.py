@@ -46,6 +46,8 @@ class BlockSettingsTests(unittest.TestCase):
 
         self.assertTrue(settings.ignore_replies)
         self.assertTrue(settings.ignore_mentions)
+        self.assertEqual(settings.reply_delay_min, 0.0)
+        self.assertEqual(settings.reply_delay_max, 0.0)
 
 
 class ConfigManagerBlockSettingsTests(unittest.TestCase):
@@ -71,6 +73,8 @@ class ConfigManagerBlockSettingsTests(unittest.TestCase):
                 account_tokens=["token-1"],
                 ignore_replies=False,
                 ignore_mentions=False,
+                reply_delay_min=2.0,
+                reply_delay_max=6.0,
                 case_sensitive=True,
             )
 
@@ -89,6 +93,8 @@ class ConfigManagerBlockSettingsTests(unittest.TestCase):
             self.assertEqual(loaded_block_settings.account_tokens, ["token-1"])
             self.assertFalse(loaded_block_settings.ignore_replies)
             self.assertFalse(loaded_block_settings.ignore_mentions)
+            self.assertEqual(loaded_block_settings.reply_delay_min, 2.0)
+            self.assertEqual(loaded_block_settings.reply_delay_max, 6.0)
             self.assertFalse(loaded_block_settings.case_sensitive)
 
     def test_saves_and_loads_reply_thread_mode_setting(self):

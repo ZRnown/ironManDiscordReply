@@ -258,6 +258,8 @@ class ConfigManager:
                 "account_tokens": block_settings.account_tokens,
                 "ignore_replies": block_settings.ignore_replies,
                 "ignore_mentions": block_settings.ignore_mentions,
+                "reply_delay_min": block_settings.reply_delay_min,
+                "reply_delay_max": block_settings.reply_delay_max,
                 "case_sensitive": False,
             },
             "external_rule_sync_settings": normalized_sync_settings,
@@ -382,6 +384,8 @@ class ConfigManager:
                 account_tokens=account_tokens,
                 ignore_replies=block_settings_data.get("ignore_replies", legacy_ignore_replies),
                 ignore_mentions=block_settings_data.get("ignore_mentions", legacy_ignore_mentions),
+                reply_delay_min=block_settings_data.get("reply_delay_min", 0.0),
+                reply_delay_max=block_settings_data.get("reply_delay_max", 0.0),
                 case_sensitive=False,
             )
 
@@ -417,6 +421,8 @@ class ConfigManager:
                     "account_tokens": block_settings.account_tokens,
                     "ignore_replies": block_settings.ignore_replies,
                     "ignore_mentions": block_settings.ignore_mentions,
+                    "reply_delay_min": block_settings.reply_delay_min,
+                    "reply_delay_max": block_settings.reply_delay_max,
                     "case_sensitive": False,
                 },
                 "external_rule_sync_settings": self.external_rule_sync_settings,
@@ -535,6 +541,8 @@ class ConfigManager:
                 account_tokens=account_tokens,
                 ignore_replies=block_settings_data.get("ignore_replies", legacy_ignore_replies),
                 ignore_mentions=block_settings_data.get("ignore_mentions", legacy_ignore_mentions),
+                reply_delay_min=block_settings_data.get("reply_delay_min", 0.0),
+                reply_delay_max=block_settings_data.get("reply_delay_max", 0.0),
                 case_sensitive=False,
             )
 

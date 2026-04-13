@@ -10,7 +10,7 @@ from typing import List, Optional
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QListWidget, QListWidgetItem, QPushButton, QLabel,
-    QLineEdit, QTextEdit, QComboBox, QSpinBox,
+    QLineEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox,
     QCheckBox, QGroupBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QMessageBox, QFileDialog, QSplitter, QProgressBar,
     QDialog, QMenu, QScrollArea, QAbstractItemView
@@ -118,7 +118,7 @@ class AccountDialog(QDialog):
         channels_layout.addWidget(channels_hint)
         layout.addLayout(channels_layout)
 
-        speed_hint = QLabel("回复速度已固定为 0 秒，命中后立即回复。")
+        speed_hint = QLabel("账号级回复速度已停用；全局随机回复时间请到“编辑整体设置”里配置。")
         speed_hint.setStyleSheet("color: gray;")
         layout.addWidget(speed_hint)
 
@@ -704,6 +704,35 @@ class BlockSettingsDialog(QDialog):
 
         layout.addWidget(match_group)
 
+        reply_delay_group = QGroupBox("随机回复时间")
+        reply_delay_layout = QVBoxLayout(reply_delay_group)
+        reply_delay_hint = QLabel("命中消息后，会在这里设置的区间里随机选一个秒数再发送。填 0 到 0 表示立即回复。")
+        reply_delay_hint.setStyleSheet("color: gray;")
+        reply_delay_hint.setWordWrap(True)
+        reply_delay_layout.addWidget(reply_delay_hint)
+
+        reply_delay_inputs_layout = QHBoxLayout()
+        reply_delay_inputs_layout.addWidget(QLabel("最小秒数:"))
+        self.reply_delay_min_spin = QDoubleSpinBox()
+        self.reply_delay_min_spin.setRange(0.0, 3600.0)
+        self.reply_delay_min_spin.setDecimals(1)
+        self.reply_delay_min_spin.setSingleStep(0.5)
+        self.reply_delay_min_spin.setSuffix(" 秒")
+        self.reply_delay_min_spin.setValue(getattr(self.block_settings, "reply_delay_min", 0.0))
+        reply_delay_inputs_layout.addWidget(self.reply_delay_min_spin)
+
+        reply_delay_inputs_layout.addWidget(QLabel("最大秒数:"))
+        self.reply_delay_max_spin = QDoubleSpinBox()
+        self.reply_delay_max_spin.setRange(0.0, 3600.0)
+        self.reply_delay_max_spin.setDecimals(1)
+        self.reply_delay_max_spin.setSingleStep(0.5)
+        self.reply_delay_max_spin.setSuffix(" 秒")
+        self.reply_delay_max_spin.setValue(getattr(self.block_settings, "reply_delay_max", 0.0))
+        reply_delay_inputs_layout.addWidget(self.reply_delay_max_spin)
+        reply_delay_inputs_layout.addStretch()
+        reply_delay_layout.addLayout(reply_delay_inputs_layout)
+        layout.addWidget(reply_delay_group)
+
         keyword_group = QGroupBox("屏蔽关键词")
         keyword_layout = QVBoxLayout(keyword_group)
         keyword_hint = QLabel("命中这些词的消息会被直接跳过，支持逗号、分号或换行分隔。频道范围跟随账号的回复频道设置。")
@@ -903,6 +932,8 @@ class BlockSettingsDialog(QDialog):
             account_tokens=self.get_selected_account_tokens(),
             ignore_replies=self.ignore_replies_checkbox.isChecked(),
             ignore_mentions=self.ignore_mentions_checkbox.isChecked(),
+            reply_delay_min=self.reply_delay_min_spin.value(),
+            reply_delay_max=self.reply_delay_max_spin.value(),
             case_sensitive=False,
         )
 
@@ -1043,7 +1074,7 @@ class AccountEditDialog(QDialog):
         channels_layout.addWidget(channels_hint)
         layout.addLayout(channels_layout)
 
-        speed_hint = QLabel("回复速度已固定为 0 秒，命中后立即回复。")
+        speed_hint = QLabel("账号级回复速度已停用；全局随机回复时间请到“编辑整体设置”里配置。")
         speed_hint.setStyleSheet("color: gray;")
         layout.addWidget(speed_hint)
 
@@ -2511,7 +2542,17 @@ class MainWindow(QMainWindow):
             else:
                 scope_text = "指定账号：0 个"
 
+        delay_min = float(getattr(block_settings, "reply_delay_min", 0.0) or 0.0)
+        delay_max = float(getattr(block_settings, "reply_delay_max", 0.0) or 0.0)
+        if delay_min <= 0 and delay_max <= 0:
+            reply_delay_text = "随机回复 立即发送"
+        elif delay_min == delay_max:
+            reply_delay_text = f"随机回复 {delay_min:g} 秒"
+        else:
+            reply_delay_text = f"随机回复 {delay_min:g}-{delay_max:g} 秒"
+
         summary_parts = [
+            reply_delay_text,
             f"屏蔽关键词 {keyword_count} 项",
             f"屏蔽用户ID {user_count} 个",
             f"屏蔽频道 {channel_count} 个" if channel_count else "屏蔽频道 跟随账号范围",
